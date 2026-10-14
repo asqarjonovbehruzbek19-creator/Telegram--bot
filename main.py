@@ -1,141 +1,159 @@
+
 import os
-import telebot
-from telebot import types
-from yt_dlp import YoutubeDL
+import asyncio
+import logging
+import yt_dlp
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# 1. Tokeningizni shu yerga yozing
-BOT_TOKEN = "8876050592:AAFItuCq50hD9kf6vUFXDOP-VHQvapHRZuE"
-ADMIN_ID = 123456789  # O'z Telegram ID raqamingizni yozishingiz mumkin
+TOKEN = "8876050592:AAFItuCq50hD9kf6vUFXDOP-VHQvapHRZuE"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-users_set = set()
-user_urls = {}
-user_languages = {}  # Foydalanuvchilarning tillari
-
-# Har xil tillardagi matnlar
-TEXTS = {
-    'uz': {
-        'welcome': "🔥 **Assalomu alaykum!** Botimizga xush kelibsiz.\n\n📥 YouTube, Instagram yoki boshqa platformalardan video yoki musiqa yuklab olish uchun menga havolani (linkni) yuboring.",
-        'choose_lang': "🇺🇿 Iltimos, tilni tanlang:",
-        'choose_dl': "📥 **Yuklab olish turini tanlang:**",
-        'lang_changed': "✅ Til O'zbek tiliga o'zgartirildi!",
-        'downloading': "⏳ Yuklab olinmoqda, iltimos kuting...",
-        'error': "❌ Xatolik yuz berdi. Iltimos, havolani tekshirib qaytadan urinib ko'ring."
-    },
-    'ru': {
-        'welcome': "🔥 **Здравствуйте!** Добро пожаловать.\n\n📥 Отправьте мне ссылку на видео или музыку для скачивания.",
-        'choose_lang': "🇷🇺 Пожалуйста, выберите язык:",
-        'choose_dl': "📥 **Выберите формат скачивания:**",
-        'lang_changed': "✅ Язык изменен на Русский!",
-        'downloading': "⏳ Загрузка, пожалуйста подождите...",
-        'error': "❌ Произошла ошибка. Пожалуйста, проверьте ссылку."
+# 1. Videoni yuklab beruvchi funksiya
+def download_video(url):
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': 'downloads/%(id)s.%(ext)s',
+        'restrictfilenames': True,
     }
-}
+    os.makedirs('downloads', exist_ok=True)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info.get('title', 'Video')
 
-def get_lang(user_id):
-    return user_languages.get(user_id, 'uz')
+# 2. Qo'shiqni (Audio) yuklab beruvchi funksiya
+def download_audio(url_or_query):
+    if not url_or_query.startswith("http"):
+        search_query = f"ytsearch1:{url_or_query}"
+    else:
+        search_query = url_or_query
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    user_id = message.from_user.id
-    users_set.add(user_id)
-    lang = get_lang(user_id)
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_uz = types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data='lang_uz')
-    btn_ru = types.InlineKeyboardButton("🇷🇺 Русский", callback_data='lang_ru')
-    markup.add(btn_uz, btn_ru)
-    
-    bot.send_message(message.chat.id, TEXTS[lang]['welcome'], parse_mode='Markdown', reply_markup=markup)
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': 'downloads/%(id)s.%(ext)s',
+        'restrictfilenames': True,
+        'default_search': 'auto',
+    }
+    os.makedirs('downloads', exist_ok=True)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(search_query, download=True)
+        if 'entries' in info:
+            info = info['entries'][0]
+        filename = ydl.prepare_filename(info)
+        audio_file = os.path.splitext(filename)[0] + '.mp3'
+        return audio_file, info.get('title', 'Musiqa')
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('lang_'))
-def handle_language(call):
-    user_id = call.from_user.id
-    lang = call.data.split('_')[1]
-    user_languages[user_id] = lang
-    
-    bot.answer_callback_query(call.id, TEXTS[lang]['lang_changed'])
-    bot.edit_message_text(TEXTS[lang]['welcome'], call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+# 3. 10 ta natija qidirish funksiyasi
+def search_songs(query):
+    ydl_opts = {
+        'extract_flat': True,
+        'default_search': 'ytsearch10',
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(query, download=False)
+        return info.get('entries', [])
 
-@bot.message_handler(func=lambda message: message.text and message.text.startswith('http'))
-def handle_url(message):
-    user_id = message.from_user.id
-    lang = get_lang(user_id)
-    user_urls[user_id] = message.text
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_video = types.InlineKeyboardButton("🎥 Video yuklash", callback_data='dl_video')
-    btn_audio = types.InlineKeyboardButton("🎵 Musiqa (MP3)", callback_data='dl_audio')
-    markup.add(btn_video, btn_audio)
-    
-    bot.reply_to(message, TEXTS[lang]['choose_dl'], parse_mode='Markdown', reply_markup=markup)
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer(
+        "Salom! Menga YouTube havolasini yuboring yoki shunchaki **qo'shiq nomini** yozing. 🎵"
+    )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
-def handle_download_type(call):
-    user_id = call.from_user.id
-    lang = get_lang(user_id)
-    url = user_urls.get(user_id)
+@dp.message(F.text)
+async def handle_text(message: types.Message):
+    text = message.text.strip()
     
-    if not url:
-        bot.answer_callback_query(call.id, "Havola topilmadI!")
-        return
+    if text.startswith("http"):
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🎬 Videoni yuklash", callback_data=f"vid|{text}")
+        builder.button(text="🎵 Qo'shiqni yuklash", callback_data=f"aud|{text}")
+        builder.adjust(1)
+        await message.answer("Yuklab olish turini tanlang:", reply_markup=builder.as_markup())
+    else:
+        wait_msg = await message.answer("⏳ **Qidirilmoqda...** Iltimos kuting.")
+        try:
+            results = search_songs(f"ytsearch10:{text}")
+            if not results:
+                await bot.edit_message_text("❌ Hech narsa topilmadi.", chat_id=message.chat.id, message_id=wait_msg.message_id)
+                return
 
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, TEXTS[lang]['downloading'])
+            response_text = f"🎵 **'{text}' bo'yicha topilgan variantlar:**\n\n"
+            builder = InlineKeyboardBuilder()
+
+            for idx, entry in enumerate(results, start=1):
+                title = entry.get('title', 'Nomaʼlum')
+                video_id = entry.get('id')
+                response_text += f"{idx}. {title}\n"
+                builder.button(text=str(idx), callback_data=f"dl|{video_id}")
+
+            builder.adjust(5, 5)
+            await bot.edit_message_text(
+                response_text,
+                chat_id=message.chat.id,
+                message_id=wait_msg.message_id,
+                reply_markup=builder.as_markup()
+            )
+        except Exception as e:
+            await bot.edit_message_text(f"❌ Xatolik: {e}", chat_id=message.chat.id, message_id=wait_msg.message_id)
+
+@dp.callback_query(F.data.startswith("vid|") | F.data.startswith("aud|") | F.data.startswith("dl|"))
+async def process_download(callback: types.CallbackQuery):
+    data_parts = callback.data.split("|", 1)
+    action = data_parts[0]
+    target = data_parts[1]
+    
+    # ⏳ Faqat video yoki audio tugmalari bosilganda katta qum soat chiqadi
+    if action in ["vid", "aud"]:
+        await callback.message.edit_text(
+            "⏳ **YUKLANMOQDA...**\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Fayl tayyorlanmoqda, iltimos biroz kuting..."
+        )
+    else:
+        # Raqamlar bosilganda oddiyroq xabar yoki darhol yuklash holati
+        await callback.message.edit_text("⏳ Tanlangan qo'shiq yuklab olinmoqda...")
 
     try:
-        if call.data == 'dl_video':
-            ydl_opts = {'format': 'best', 'outtmpl': 'downloads/%(id)s.%(ext)s', 'max_filesize': 50*1024*1024}
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-            with open(filename, 'rb') as f:
-                bot.send_video(call.message.chat.id, f)
-            os.remove(filename)
-            
-        elif call.data == 'dl_audio':
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': 'downloads/%(id)s.%(ext)s',
-                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
-                'max_filesize': 50*1024*1024
-            }
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-            with open(filename, 'rb') as f:
-                bot.send_audio(call.message.chat.id, f)
-            os.remove(filename)
-            
+        if action == "vid":
+            file_path, title = download_video(target)
+            with open(file_path, 'rb') as video:
+                await callback.message.answer_video(video, caption=f"🎬 {title}")
+            await callback.message.delete()
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+        elif action == "aud":
+            file_path, title = download_audio(target)
+            with open(file_path, 'rb') as audio:
+                await callback.message.answer_audio(audio, caption=f"🎧 {title}")
+            await callback.message.delete()
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+        elif action == "dl":
+            url = f"https://www.youtube.com/watch?v={target}"
+            file_path, title = download_audio(url)
+            with open(file_path, 'rb') as audio:
+                await callback.message.answer_audio(audio, caption=f"🎧 {title}")
+            await callback.message.delete()
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
     except Exception as e:
-        print(f"Xatolik: {e}")
-        bot.send_message(call.message.chat.id, TEXTS[lang]['error'])
+        await callback.message.edit_text(f"❌ Xatolik yuz berdi: {e}")
 
-# 2. Flask va Botni parallel ishga tushirish qismi
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is running 24/7!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+async def main():
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Eski webhooklarni tozalash
-    bot.remove_webhook()
-    print("Bot va Flask serveri ishga tushmoqda...")
-    
-    # Avval Flask serverini fonda ishga tushiramiz
-    keep_alive()
-    
-    # Keyin botni polling rejimida ishga qo'shamiz
-    bot.infinity_polling(skip_pending=True)
+    asyncio.run(main())
