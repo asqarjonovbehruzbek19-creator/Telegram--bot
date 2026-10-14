@@ -3,7 +3,7 @@ import telebot
 from telebot import types
 from yt_dlp import YoutubeDL
 
-BOT_TOKEN = "8876050592:AAFQGkAYEOX_pbURhp6x5VsbJD_0S4adafo"
+BOT_TOKEN = "8876050592:AAEBobXO9XJuKHZzuJb-q8EVGMw4vBmOSAY"
 ADMIN_ID = 123456789  # <-- O'z Telegram ID raqamingizni yozing
 
 bot = telebot.TeleBot(BOT_TOKEN)
