@@ -13,7 +13,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# 1. Videoni yuklab beruvchi funksiya
 def download_video(url):
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -26,7 +25,6 @@ def download_video(url):
         filename = ydl.prepare_filename(info)
         return filename, info.get('title', 'Video')
 
-# 2. Qo'shiqni (Audio) yuklab beruvchi funksiya
 def download_audio(url_or_query):
     if not url_or_query.startswith("http"):
         search_query = f"ytsearch1:{url_or_query}"
@@ -53,7 +51,6 @@ def download_audio(url_or_query):
         audio_file = os.path.splitext(filename)[0] + '.mp3'
         return audio_file, info.get('title', 'Musiqa')
 
-# 3. 10 ta natija qidirish funksiyasi
 def search_songs(query):
     ydl_opts = {
         'extract_flat': True,
@@ -112,7 +109,6 @@ async def process_download(callback: types.CallbackQuery):
     action = data_parts[0]
     target = data_parts[1]
     
-    # ⏳ Faqat video yoki audio tugmalari bosilganda katta qum soat chiqadi
     if action in ["vid", "aud"]:
         await callback.message.edit_text(
             "⏳ **YUKLANMOQDA...**\n"
@@ -120,7 +116,6 @@ async def process_download(callback: types.CallbackQuery):
             "Fayl tayyorlanmoqda, iltimos biroz kuting..."
         )
     else:
-        # Raqamlar bosilganda oddiyroq xabar yoki darhol yuklash holati
         await callback.message.edit_text("⏳ Tanlangan qo'shiq yuklab olinmoqda...")
 
     try:
