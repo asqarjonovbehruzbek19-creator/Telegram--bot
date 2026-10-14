@@ -3,168 +3,116 @@ import telebot
 from telebot import types
 from yt_dlp import YoutubeDL
 
+# 1. Tokeningizni shu yerga yozing
 BOT_TOKEN = "8876050592:AAFQGkAYEOX_pbURhp6x5VsbJD_0S4adafo"
-ADMIN_ID = 123456789  # <-- O'z Telegram ID raqamingizni yozing
+ADMIN_ID = 123456789  # O'z Telegram ID raqamingizni yozishingiz mumkin
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 users_set = set()
 user_urls = {}
-user_languages = {} # Foydalanuvchilarning tillarini saqlash uchun
+user_languages = {}  # Foydalanuvchilarning tillari
 
 # Har xil tillardagi matnlar
 TEXTS = {
     'uz': {
-        'welcome': "🔥 **Assalomu alaykum. Botga Xush kelibsiz.**\nBot orqali Instagram, YouTube va TikTok'dan video va audio yuklab olishingiz mumkin.\n\n🚀 **Yuklab olmoqchi bo'lgan havolani yuboring!**",
+        'welcome': "🔥 **Assalomu alaykum!** Botimizga xush kelibsiz.\n\n📥 YouTube, Instagram yoki boshqa platformalardan video yoki musiqa yuklab olish uchun menga havolani (linkni) yuboring.",
         'choose_lang': "🇺🇿 Iltimos, tilni tanlang:",
         'choose_dl': "📥 **Yuklab olish turini tanlang:**",
-        'lang_changed': "✅ Til O'zbek tiliga o'zgartirildi!"
+        'lang_changed': "✅ Til O'zbek tiliga o'zgartirildi!",
+        'downloading': "⏳ Yuklab olinmoqda, iltimos kuting...",
+        'error': "❌ Xatolik yuz berdi. Iltimos, havolani tekshirib qaytadan urinib ko'ring."
     },
     'ru': {
-        'welcome': "🔥 **Здравствуйте. Добро пожаловать в бот.**\nЗдесь вы можете скачивать видео и аудио из Instagram, YouTube и TikTok.\n\n🚀 **Отправьте ссылку для скачивания!**",
+        'welcome': "🔥 **Здравствуйте!** Добро пожаловать.\n\n📥 Отправьте мне ссылку на видео или музыку для скачивания.",
         'choose_lang': "🇷🇺 Пожалуйста, выберите язык:",
-        'choose_dl': "📥 **Выберите тип скачивания:**",
-        'lang_changed': "✅ Язык изменен на русский!"
-    },
-    'en': {
-        'welcome': "🔥 **Hello. Welcome to the bot.**\nYou can download video and audio from Instagram, YouTube, and TikTok.\n\n🚀 **Send the link to download!**",
-        'choose_lang': "🇬🇧 Please choose your language:",
-        'choose_dl': "📥 **Choose download type:**",
-        'lang_changed': "✅ Language changed to English!"
+        'choose_dl': "📥 **Выберите формат скачивания:**",
+        'lang_changed': "✅ Язык изменен на Русский!",
+        'downloading': "⏳ Загрузка, пожалуйста подождите...",
+        'error': "❌ Произошла ошибка. Пожалуйста, проверьте ссылку."
     }
 }
 
-@bot.message_handler(commands=['start', 'help'])
+def get_lang(user_id):
+    return user_languages.get(user_id, 'uz')
+
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
-    users_set.add(message.chat.id)
+    user_id = message.from_user.id
+    users_set.add(user_id)
+    lang = get_lang(user_id)
     
-    # Tilni tanlash uchun tugmalar
-    markup = types.InlineKeyboardMarkup(row_width=3)
-    btn_uz = types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data="lang_uz")
-    btn_ru = types.InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")
-    btn_en = types.InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
-    markup.add(btn_uz, btn_ru, btn_en)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_uz = types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data='lang_uz')
+    btn_ru = types.InlineKeyboardButton("🇷🇺 Русский", callback_data='lang_ru')
+    markup.add(btn_uz, btn_ru)
     
-    bot.reply_to(message, "🌍 Iltimos, tilni tanlang / Пожалуйста, выберите язык / Please select language:", reply_markup=markup)
+    bot.send_message(message.chat.id, TEXTS[lang]['welcome'], parse_mode='Markdown', reply_markup=markup)
 
-# --- ADMIN PANEL ---
-@bot.message_handler(commands=['stat'])
-def show_stats(message):
-    if message.chat.id == ADMIN_ID:
-        bot.reply_to(message, f"📊 **Jami foydalanuvchilar:** {len(users_set)} ta", parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "Bu buyruq faqat admin uchun!")
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast_message(message):
-    if message.chat.id == ADMIN_ID:
-        text_to_send = message.text.replace('/broadcast', '').strip()
-        if not text_to_send:
-            bot.reply_to(message, "Xabar matnini kiriting.")
-            return
-        success = 0
-        for uid in users_set:
-            try:
-                bot.send_message(uid, text_to_send)
-                success += 1
-            except:
-                pass
-        bot.reply_to(message, f"✅ Xabar tarqatildi: {success} ta foydalanuvchiga.")
-    else:
-        bot.reply_to(message, "Bu buyruq faqat admin uchun!")
-
-# --- Til tanlash va havolalarni qabul qilish ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith('lang_') or call.data.startswith('dl_'))
-def callback_handler(call):
-    chat_id = call.message.chat.id
+@bot.callback_query_handler(func=lambda call: call.data.startswith('lang_'))
+def handle_language(call):
+    user_id = call.from_user.id
+    lang = call.data.split('_')[1]
+    user_languages[user_id] = lang
     
-    # Til o'zgartirish tugmalari bosilganda
-    if call.data.startswith('lang_'):
-        lang = call.data.split('_')[1]
-        user_languages[chat_id] = lang
-        bot.answer_callback_query(call.id, TEXTS[lang]['lang_changed'])
-        bot.send_message(chat_id, TEXTS[lang]['welcome'], parse_mode="Markdown")
-        return
+    bot.answer_callback_query(call.id, TEXTS[lang]['lang_changed'])
+    bot.edit_message_text(TEXTS[lang]['welcome'], call.message.chat.id, call.message.message_id, parse_mode='Markdown')
 
-    # Yuklab olish turini tanlash tugmalari bosilganda
-    url = user_urls.get(chat_id)
-    lang = user_languages.get(chat_id, 'uz') # Standart til O'zbekcha
+@bot.message_handler(func=lambda message: message.text and message.text.startswith('http'))
+def handle_url(message):
+    user_id = message.from_user.id
+    lang = get_lang(user_id)
+    user_urls[user_id] = message.text
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_video = types.InlineKeyboardButton("🎥 Video yuklash", callback_data='dl_video')
+    btn_audio = types.InlineKeyboardButton("🎵 Musiqa (MP3)", callback_data='dl_audio')
+    markup.add(btn_video, btn_audio)
+    
+    bot.reply_to(message, TEXTS[lang]['choose_dl'], parse_mode='Markdown', reply_markup=markup)
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('dl_'))
+def handle_download_type(call):
+    user_id = call.from_user.id
+    lang = get_lang(user_id)
+    url = user_urls.get(user_id)
+    
     if not url:
-        bot.answer_callback_query(call.id, "Havola topilmadi. Qaytadan yuboring.")
+        bot.answer_callback_query(call.id, "Havola topilmadI!")
         return
 
-    action = call.data
-    bot.answer_callback_query(call.id, "Yuklab olish boshlandi...")
-    msg = bot.send_message(chat_id, "⏳ Kuting...")
-
-    ydl_video_opts = {'format': 'b', 'outtmpl': 'downloads/%(id)s_video.%(ext)s', 'quiet': True, 'no_warnings': True}
-    ydl_audio_opts = {'format': 'ba', 'outtmpl': 'downloads/%(id)s_audio.%(ext)s', 'quiet': True, 'no_warnings': True}
-
-    video_filename = None
-    audio_filename = None
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, TEXTS[lang]['downloading'])
 
     try:
-        if action == 'dl_video':
-            with YoutubeDL(ydl_video_opts) as ydl:
-                v_info = ydl.extract_info(url, download=True)
-                video_filename = ydl.prepare_filename(v_info)
-            with open(video_filename, 'rb') as vf:
-                bot.send_video(chat_id, vf, caption=v_info.get('title', 'Video'))
-
-        elif action == 'dl_audio':
-            with YoutubeDL(ydl_audio_opts) as ydl:
-                a_info = ydl.extract_info(url, download=True)
-                audio_filename = ydl.prepare_filename(a_info)
-            with open(audio_filename, 'rb') as af:
-                bot.send_audio(chat_id, af, title=a_info.get('title', 'Audio'))
-
-        elif action == 'dl_both':
-            with YoutubeDL(ydl_video_opts) as ydl:
-                v_info = ydl.extract_info(url, download=True)
-                video_filename = ydl.prepare_filename(v_info)
-            with YoutubeDL(ydl_audio_opts) as ydl:
-                a_info = ydl.extract_info(url, download=True)
-                audio_filename = ydl.prepare_filename(a_info)
-            with open(video_filename, 'rb') as vf:
-                bot.send_video(chat_id, vf, caption=v_info.get('title', 'Video'))
-            with open(audio_filename, 'rb') as af:
-                bot.send_audio(chat_id, af, title=a_info.get('title', 'Audio'))
-
-        if video_filename and os.path.exists(video_filename):
-            os.remove(video_filename)
-        if audio_filename and os.path.exists(audio_filename):
-            os.remove(audio_filename)
-
-        bot.delete_message(chat_id, msg.message_id)
-
+        if call.data == 'dl_video':
+            ydl_opts = {'format': 'best', 'outtmpl': 'downloads/%(id)s.%(ext)s', 'max_filesize': 50*1024*1024}
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+            with open(filename, 'rb') as f:
+                bot.send_video(call.message.chat.id, f)
+            os.remove(filename)
+            
+        elif call.data == 'dl_audio':
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': 'downloads/%(id)s.%(ext)s',
+                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+                'max_filesize': 50*1024*1024
+            }
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+            with open(filename, 'rb') as f:
+                bot.send_audio(call.message.chat.id, f)
+            os.remove(filename)
+            
     except Exception as e:
-        bot.edit_message_text(f"❌ Xatolik: {e}", chat_id, msg.message_id)
+        print(f"Xatolik: {e}")
+        bot.send_message(call.message.chat.id, TEXTS[lang]['error'])
 
-@bot.message_handler(func=lambda message: True)
-def handle_link(message):
-    users_set.add(message.chat.id)
-    chat_id = message.chat.id
-    url = message.text.strip()
-    lang = user_languages.get(chat_id, 'uz')
-    
-    if not (url.startswith("http://") or url.startswith("https://")):
-        bot.reply_to(message, "Iltimos, to'g'ri havola yuboring!" if lang == 'uz' else "Please send a valid link!")
-        return
-
-    user_urls[chat_id] = url
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_video = types.InlineKeyboardButton("🎥 Video" if lang == 'uz' else "🎥 Video", callback_data="dl_video")
-    btn_audio = types.InlineKeyboardButton("🎵 Audio" if lang == 'uz' else "🎵 Audio", callback_data="dl_audio")
-    btn_both = types.InlineKeyboardButton("📦 Ikkalasi / Both" if lang != 'ru' else "📦 И то и другое", callback_data="dl_both")
-    markup.add(btn_video, btn_audio, btn_both)
-
-    bot.reply_to(message, TEXTS[lang]['choose_dl'], reply_markup=markup, parse_mode="Markdown")
-
-bot.remove_webhook()
-print("Bot ishga tushdi...")
-bot.infinity_polling()
+# 2. Flask va Botni parallel ishga tushirish qismi
 from flask import Flask
 from threading import Thread
 
@@ -172,7 +120,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "Bot is running 24/7!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -182,4 +130,12 @@ def keep_alive():
     t.start()
 
 if __name__ == "__main__":
+    # Eski webhooklarni tozalash
+    bot.remove_webhook()
+    print("Bot va Flask serveri ishga tushmoqda...")
+    
+    # Avval Flask serverini fonda ishga tushiramiz
     keep_alive()
+    
+    # Keyin botni polling rejimida ishga qo'shamiz
+    bot.infinity_polling(skip_pending=True)
