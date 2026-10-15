@@ -1,8 +1,9 @@
-
 import os
 import asyncio
 import logging
 import yt_dlp
+from flask import Flask
+from threading import Thread
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -12,6 +13,22 @@ TOKEN = "8876050592:AAFItuCq50hD9kf6vUFXDOP-VHQvapHRZuE"
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# --- RENDER UCHUN FLASK SERVER (PORT MUAMMOSINI HAL QILADI) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.start()
+# -------------------------------------------------------------
 
 def download_video(url):
     ydl_opts = {
@@ -63,7 +80,7 @@ def search_songs(query):
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
-        "Salom! Menga YouTube havolasini yuboring yoki shunchaki **qo'shiq nomini** yozing. 🎵"
+        "Salom! Menga YouTube havolasini yuboring yoki shunchaki qo'shiq nomini yozing. 🎵"
     )
 
 @dp.message(F.text)
@@ -77,14 +94,14 @@ async def handle_text(message: types.Message):
         builder.adjust(1)
         await message.answer("Yuklab olish turini tanlang:", reply_markup=builder.as_markup())
     else:
-        wait_msg = await message.answer("⏳ **Qidirilmoqda...** Iltimos kuting.")
+        status_msg = await message.answer("Qidirilmoqda...")
         try:
             results = search_songs(f"ytsearch10:{text}")
             if not results:
-                await bot.edit_message_text("❌ Hech narsa topilmadi.", chat_id=message.chat.id, message_id=wait_msg.message_id)
+                await bot.edit_message_text("Hech narsa topilmadi.", chat_id=message.chat.id, message_id=status_msg.message_id)
                 return
 
-            response_text = f"🎵 **'{text}' bo'yicha topilgan variantlar:**\n\n"
+            response_text = f"'{text}' bo'yicha topilgan variantlar:\n\n"
             builder = InlineKeyboardBuilder()
 
             for idx, entry in enumerate(results, start=1):
@@ -97,11 +114,11 @@ async def handle_text(message: types.Message):
             await bot.edit_message_text(
                 response_text,
                 chat_id=message.chat.id,
-                message_id=wait_msg.message_id,
+                message_id=status_msg.message_id,
                 reply_markup=builder.as_markup()
             )
         except Exception as e:
-            await bot.edit_message_text(f"❌ Xatolik: {e}", chat_id=message.chat.id, message_id=wait_msg.message_id)
+            await bot.edit_message_text(f"Xatolik: {e}", chat_id=message.chat.id, message_id=status_msg.message_id)
 
 @dp.callback_query(F.data.startswith("vid|") | F.data.startswith("aud|") | F.data.startswith("dl|"))
 async def process_download(callback: types.CallbackQuery):
@@ -109,14 +126,7 @@ async def process_download(callback: types.CallbackQuery):
     action = data_parts[0]
     target = data_parts[1]
     
-    if action in ["vid", "aud"]:
-        await callback.message.edit_text(
-            "⏳ **YUKLANMOQDA...**\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            "Fayl tayyorlanmoqda, iltimos biroz kuting..."
-        )
-    else:
-        await callback.message.edit_text("⏳ Tanlangan qo'shiq yuklab olinmoqda...")
+    await callback.message.edit_text("Yuklab olinmoqda...")
 
     try:
         if action == "vid":
@@ -145,10 +155,12 @@ async def process_download(callback: types.CallbackQuery):
                 os.remove(file_path)
                 
     except Exception as e:
-        await callback.message.edit_text(f"❌ Xatolik yuz berdi: {e}")
+        await callback.message.edit_text(f"Xatolik yuz berdi: {e}")
 
 async def main():
+    keep_alive()  # Flask serverni ishga tushiradi
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
