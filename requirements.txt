@@ -1,6 +1,7 @@
-
-aiogram>=3.13,<4
-Flask>=3.0
+aiogram
 yt-dlp
+flask
+aiohttp
+
 
 
