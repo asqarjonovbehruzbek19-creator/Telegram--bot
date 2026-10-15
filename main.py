@@ -18,7 +18,7 @@ from aiogram.utils.keyboard import (
 )
 
 # TOKEN Render Environment Variables ichida bo'lishi kerak
-TOKEN = os.getenv("BOT_TOKEN", "")
+TOKEN = os.getenv("BOT_TOKEN", "8876050592:AAGm3o9VuHG58deU0nmyhCwABSdV4-XlTMc")
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN kiritilmagan!")
