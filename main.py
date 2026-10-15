@@ -11,7 +11,7 @@ from telebot import types
 # Logging sozlamalari
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8820793134:AAFqXcnF5Xk_KxHK-3qPx3-y59amLGeUAGQ")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
@@ -123,7 +123,6 @@ def cmd_start(message):
   user_id = message.from_user.id
   add_user(user_id)
   
-  # Agar tili belgilanmagan bo'lsa, til tanlashni chiqaramiz
   if user_id not in user_languages:
     bot.send_message(
         message.chat.id,
@@ -146,7 +145,6 @@ def cmd_stats(message):
   else:
     bot.send_message(message.chat.id, "❌ Bu buyruq faqat admin uchun!")
 
-# Inline tugmalar orqali tilni o'zgartirish
 @bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
 def callback_language(call):
   user_id = call.from_user.id
@@ -163,7 +161,6 @@ def callback_language(call):
       reply_markup=get_main_keyboard(lang)
   )
 
-# "🌐 Til / Language" tugmasi bosilganda
 @bot.message_handler(func=lambda message: any(message.text == TEXTS[l]["btn_lang"] for l in TEXTS))
 def change_language_btn(message):
   bot.send_message(
@@ -203,6 +200,7 @@ def handle_photos(message):
   if user_id not in user_images:
     user_images[user_id] = []
 
+  # telebot uchun sinxron usul (await olib tashlandi)
   file_info = bot.get_file(message.photo[-1].file_id)
   downloaded_file = bot.download_file(file_info.file_path)
   user_images[user_id].append(downloaded_file)
@@ -247,6 +245,7 @@ if __name__ == "__main__":
   server_thread.start()
 
   bot.infinity_polling()
+
 
 
 
