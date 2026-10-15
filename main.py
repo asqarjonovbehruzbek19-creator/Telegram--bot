@@ -1,3 +1,4 @@
+
 import os
 import asyncio
 import logging
@@ -32,7 +33,7 @@ def keep_alive():
 
 def download_video(url):
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best',
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'restrictfilenames': True,
     }
@@ -44,12 +45,7 @@ def download_video(url):
 
 def download_audio(url):
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
+        'format': 'bestaudio',
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'restrictfilenames': True,
     }
@@ -57,22 +53,25 @@ def download_audio(url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-        audio_file = os.path.splitext(filename)[0] + '.mp3'
-        return audio_file, info.get('title', 'Musiqa')
-
-def search_songs(query):
-    ydl_opts = {
-        'extract_flat': True,
-        'default_search': 'ytsearch5',
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        return info.get('entries', [])
+        return filename, info.get('title', 'Musiqa')
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🇺🇿 O'zbek tili", callback_data="lang_uz")
+    builder.adjust(1)
+    
     await message.answer(
-        "Salom! Menga YouTube havolasini yuboring yoki shunchaki qo'shiq nomini yozing. 🎵"
+        "Assalomu alaykum! Botimizga xush kelibsiz.\nIltimos, tilni tanlang:\n\n"
+        "Здравствуйте! Добро пожаловать.\nПожалуйста, выберите язык:",
+        reply_markup=builder.as_markup()
+    )
+
+@dp.callback_query(F.data == "lang_uz")
+async def set_language(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🇺🇿 Til o'zbek tiliga o'zgartirildi!\n\n"
+        "Menga istalgan YouTube havolasini (linkini) yuboring, men uni video yoki musiqa ko'rinishida yuklab beraman. 🎬🎵"
     )
 
 @dp.message(F.text)
@@ -84,47 +83,17 @@ async def handle_text(message: types.Message):
         builder.button(text="🎬 Videoni yuklash", callback_data=f"vid|{text}")
         builder.button(text="🎵 Musiqani yuklash", callback_data=f"aud|{text}")
         builder.adjust(1)
-        await message.answer("Yuklab olish turini tanlang:", reply_markup=builder.as_markup())
+        await message.answer("📥 Yuklab olish turini tanlang:", reply_markup=builder.as_markup())
     else:
-        status_msg = await message.answer("Qidirilmoqda... 🔍")
-        try:
-            results = search_songs(text)
-            if not results:
-                await bot.edit_message_text("Hech narsa topilmadi.", chat_id=message.chat.id, message_id=status_msg.message_id)
-                return
+        await message.answer("⚠️ Iltimos, to'g'ridan-to'g'ri YouTube havolasini (linkini) yuboring! 🔗")
 
-            response_text = f"<b>'{text}'</b> bo'yicha topilgan natijalar:\n\n"
-            builder = InlineKeyboardBuilder()
-
-            for idx, entry in enumerate(results, start=1):
-                title = entry.get('title', 'Nomaʼlum')
-                # To'g'ridan-to'g'ri YouTube URL manzilini olamiz
-                url = entry.get('url')
-                if not url:
-                    video_id = entry.get('id')
-                    url = f"https://www.youtube.com/watch?v={video_id}"
-                
-                response_text += f"{idx}. {title}\n"
-                builder.button(text=f"📥 {idx}-ni yuklab olish", callback_data=f"dl|{url}")
-
-            builder.adjust(1)
-            await bot.edit_message_text(
-                response_text,
-                chat_id=message.chat.id,
-                message_id=status_msg.message_id,
-                parse_mode="HTML",
-                reply_markup=builder.as_markup()
-            )
-        except Exception as e:
-            await bot.edit_message_text(f"Xatolik: {e}", chat_id=message.chat.id, message_id=status_msg.message_id)
-
-@dp.callback_query(F.data.startswith("vid|") | F.data.startswith("aud|") | F.data.startswith("dl|"))
+@dp.callback_query(F.data.startswith("vid|") | F.data.startswith("aud|"))
 async def process_download(callback: types.CallbackQuery):
     data_parts = callback.data.split("|", 1)
     action = data_parts[0]
     target = data_parts[1]
     
-    await callback.message.edit_text("Yuklab olinmoqda, iltimos kuting... ⏳")
+    await callback.message.edit_text("⏳ Yuklab olinmoqda, iltimos kuting...")
 
     try:
         if action == "vid":
@@ -135,7 +104,7 @@ async def process_download(callback: types.CallbackQuery):
             if os.path.exists(file_path):
                 os.remove(file_path)
                 
-        elif action == "aud" or action == "dl":
+        elif action == "aud":
             file_path, title = download_audio(target)
             with open(file_path, 'rb') as audio:
                 await callback.message.answer_audio(audio, caption=f"🎧 {title}")
@@ -144,7 +113,7 @@ async def process_download(callback: types.CallbackQuery):
                 os.remove(file_path)
                 
     except Exception as e:
-        await callback.message.edit_text(f"Xatolik yuz berdi: {e}")
+        await callback.message.edit_text(f"❌ Xatolik yuz berdi: {e}")
 
 async def main():
     keep_alive()
