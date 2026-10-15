@@ -261,14 +261,12 @@ async def yt_aud(callback: types.CallbackQuery):
 async def main():
     keep_alive()
     
-    # Eski barcha ulanishlar va webhooklarni to'liq tozalash
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
-    
-    # Eski ishlayotgan getUpdates seanslarini to'xtatish uchun kichik tanaffus
-    await asyncio.sleep(2)
+    # MUHIM: Eski webhookni butunlay o'chirib tashlash
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
+            logger.info("Webhook tozalandi: %s", await resp.text())
+            
+    await asyncio.sleep(3)
     
     try:
         await dp.start_polling(bot, handle_signals=False)
@@ -281,6 +279,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot to'xtatildi.")
+
 
 
 
