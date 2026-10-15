@@ -163,7 +163,6 @@ async def process_instagram(callback: types.CallbackQuery, mode: str):
     status = await callback.message.answer("⏳ Instagram'dan yuklanmoqda, iltimos kuting...")
 
     try:
-        # Cobalt API orqali Instagram havolasini to'g'ridan-to'g'ri olish
         api_url = "https://co.wuk.sh/api/json"
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         payload = {"url": url, "vQuality": "720"}
@@ -261,16 +260,28 @@ async def yt_aud(callback: types.CallbackQuery):
 
 async def main():
     keep_alive()
-    # Webhookni o'chirib tashlash (Xatolikni oldini olish uchun)
-    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Eski barcha ulanishlar va webhooklarni to'liq tozalash
     try:
-        await dp.start_polling(bot)
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+    
+    # Eski ishlayotgan getUpdates seanslarini to'xtatish uchun kichik tanaffus
+    await asyncio.sleep(2)
+    
+    try:
+        await dp.start_polling(bot, handle_signals=False)
     finally:
         await bot.session.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot to'xtatildi.")
+
 
 
 
