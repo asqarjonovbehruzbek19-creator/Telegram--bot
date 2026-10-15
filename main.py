@@ -4,20 +4,16 @@ import logging
 import tempfile
 import shutil
 from pathlib import Path
-from urllib.parse import urlparse
 from threading import Thread
 
-import yt_dlp
 import aiohttp
 from flask import Flask
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.utils.keyboard import (
-    ReplyKeyboardBuilder,
-    InlineKeyboardBuilder,
-)
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from PIL import Image
 
-TOKEN = "8876050592:AAGm3o9VuHG58deU0nmyhCwABSdV4-XlTMc"
+TOKEN = "8820793134:AAFqXcnF5Xk_KxHK-3qPx3-y59amLGeUAGQ"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,246 +23,229 @@ dp = Dispatcher()
 
 app = Flask(__name__)
 
-user_urls = {}
-MAX_SIZE = 49 * 1024 * 1024
+# Foydalanuvchi ma'lumotlari: tili va rasmlari
+user_languages = {}
+user_images = {}
+
+# --- LUG'ATLAR (Tarjimalar) ---
+LANGS = {
+    "uz": {
+        "welcome": "👋 Assalomu alaykum!\n\n📸 Men yuborgan rasmlaringizni bitta **PDF** hujjatiga jamlab beruvchi botman.\n\nTilni tanlang:",
+        "about": "📄 **PDF Maker Bot**\n\nBir nechta rasmlarni yuborib, ulardan tezda sifatli PDF fayl hosil qiling.",
+        "btn_create": "📄 PDF yaratish",
+        "btn_lang": "🌍 Tilni o'zgartirish",
+        "btn_about": "ℹ️ Bot haqida",
+        "ask_lang": "Tilni tanlang / Выберите язык / Choose language:",
+        "lang_changed": "✅ Til O'zbek tiliga o'zgartirildi!",
+        "start_pdf": "📷 Rasmlarni birma-bir yoki guruhlab yuboring.\n\nBarcha rasmlarni yuborib bo'lgach, tugmani bosing:",
+        "btn_finish": "✅ PDF yaratishni yakunlash",
+        "photo_saved": "✅ Rasm qabul qilindi! Jami rasmlar: {count} ta.\n\nYana rasm yuborishingiz yoki tugmani bosishingiz mumkin:",
+        "no_photos": "❌ Hali hech qanday rasm yubormadingiz!",
+        "processing": "⏳ Rasmlar PDF formatiga o'tkazilmoqda, iltimos kuting...",
+        "success": "📄 Mana sizning PDF hujjatingiz!",
+        "error": "❌ PDF yaratishda xatolik yuz berdi. Qaytadan urinib ko'ring."
+    },
+    "ru": {
+        "welcome": "👋 Здравствуйте!\n\n📸 Я бот, который объединяет ваши фотографии в один документ **PDF**.\n\nВыберите язык:",
+        "about": "📄 **PDF Maker Bot**\n\nОтправляйте фотографии и быстро создавайте качественные PDF файлы.",
+        "btn_create": "📄 Создать PDF",
+        "btn_lang": "🌍 Изменить язык",
+        "btn_about": "ℹ️ О боте",
+        "ask_lang": "Выберите язык / Choose language / Tilni tanlang:",
+        "lang_changed": "✅ Язык изменен на русский!",
+        "start_pdf": "📷 Отправляйте фотографии по одной или альбомом.\n\nПосле отправки всех фото нажмите кнопку:",
+        "btn_finish": "✅ Завершить создание PDF",
+        "photo_saved": "✅ Фото принято! Всего фото: {count}.\n\nМожете отправить еще или нажать кнопку:",
+        "no_photos": "❌ Вы еще не отправили ни одной фотографии!",
+        "processing": "⏳ Фотографии конвертируются в PDF, пожалуйста, подождите...",
+        "success": "📄 Вот ваш PDF документ!",
+        "error": "❌ Произошла ошибка при создании PDF. Попробуйте еще раз."
+    },
+    "en": {
+        "welcome": "👋 Hello!\n\n📸 I am a bot that converts your sent images into a single **PDF** document.\n\nChoose your language:",
+        "about": "📄 **PDF Maker Bot**\n\nSend multiple images and quickly generate high-quality PDF files.",
+        "btn_create": "📄 Create PDF",
+        "btn_lang": "🌍 Change Language",
+        "btn_about": "ℹ️ About Bot",
+        "ask_lang": "Choose language / Tilni tanlang / Выберите язык:",
+        "lang_changed": "✅ Language changed to English!",
+        "start_pdf": "📷 Send photos one by one or as an album.\n\nAfter sending all photos, click the button below:",
+        "btn_finish": "✅ Finish and Create PDF",
+        "photo_saved": "✅ Photo accepted! Total photos: {count}.\n\nYou can send more or click the button:",
+        "no_photos": "❌ You haven't sent any photos yet!",
+        "processing": "⏳ Converting images to PDF, please wait...",
+        "success": "📄 Here is your PDF document!",
+        "error": "❌ An error occurred while creating PDF. Please try again."
+    }
+}
+
+def get_text(user_id, key, **kwargs):
+    lang = user_languages.get(user_id, "uz")
+    text = LANGS.get(lang, LANGS["uz"]).get(key, key)
+    return text.format(**kwargs)
+
+def get_menu(user_id):
+    kb = ReplyKeyboardBuilder()
+    kb.button(text=get_text(user_id, "btn_create"))
+    kb.button(text=get_text(user_id, "btn_lang"))
+    kb.button(text=get_text(user_id, "btn_about"))
+    kb.adjust(2, 1)
+    return kb.as_markup(resize_keyboard=True)
+
+def get_lang_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇺🇿 O'zbekcha", callback_data="lang_uz")
+    kb.button(text="🇷🇺 Русский", callback_data="lang_ru")
+    kb.button(text="🇬🇧 English", callback_data="lang_en")
+    kb.adjust(3)
+    return kb.as_markup()
 
 
 @app.route("/")
 def home():
-    return "Media bot ishlayapti!"
-
+    return "Multilingual PDF Bot ishlayapti!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-
 def keep_alive():
     Thread(target=run_flask, daemon=True).start()
 
 
-def valid_url(url):
-    try:
-        p = urlparse(url)
-        host = (p.hostname or "").lower()
-        instagram = host == "instagram.com" or host.endswith(".instagram.com")
-        youtube = host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
-        return p.scheme in ("https", "http") and (instagram or youtube)
-    except Exception:
-        return False
-
-
-def get_menu():
-    kb = ReplyKeyboardBuilder()
-    kb.button(text="📥 Yuklab olish")
-    kb.button(text="ℹ️ Bot haqida")
-    kb.adjust(2)
-    return kb.as_markup(resize_keyboard=True)
-
-
-def download_youtube(url, mode, folder):
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-
-    opts = {
-        "outtmpl": str(folder / "%(id)s.%(ext)s"),
-        "noplaylist": True,
-        "restrictfilenames": True,
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 5,
-        "socket_timeout": 60,
-        "max_filesize": MAX_SIZE,
-    }
-
-    if mode == "video":
-        opts["format"] = "best[ext=mp4]/best"
-    else:
-        opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
-
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    if not info:
-        raise RuntimeError("Media topilmadi.")
-
-    files = [p for p in folder.iterdir() if p.is_file()]
-    files = sorted(files, key=lambda p: p.stat().st_mtime)
-
-    if not files:
-        raise RuntimeError("Yuklangan fayl topilmadi.")
-
-    return files, info.get("title", "YouTube Video")
-
-
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_languages:
+        user_languages[user_id] = "uz" # Standart til
+    
     await message.answer(
-        "👋 Assalomu alaykum!\n\n"
-        "📸 Instagram videosi va audiosi\n"
-        "🎵 YouTube videolari va qo'shiqlarini yuklash\n\n"
-        "Havolani yuboring, keyin kerakli formatni tanlang.",
-        reply_markup=get_menu(),
+        get_text(user_id, "welcome"),
+        reply_markup=get_lang_keyboard()
     )
+    await message.answer("Menu:", reply_markup=get_menu(user_id))
 
 
-@dp.message(F.text == "ℹ️ Bot haqida")
+@dp.callback_query(F.data.startswith("lang_"))
+async def change_language(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    new_lang = callback.data.split("_")[1]
+    user_languages[user_id] = new_lang
+    
+    await callback.answer(get_text(user_id, "lang_changed"), show_alert=True)
+    await callback.message.edit_text(
+        get_text(user_id, "welcome"),
+        reply_markup=get_lang_keyboard()
+    )
+    # Menuni yangi tilda yangilash uchun xabar yuboramiz
+    await callback.message.answer("Menu:", reply_markup=get_menu(user_id))
+
+
+@dp.message(F.text.in_(["🌍 Tilni o'zgartirish", "🌍 Изменить язык", "🌍 Change Language"]))
+async def ask_language_cmd(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(get_text(user_id, "ask_lang"), reply_markup=get_lang_keyboard())
+
+
+@dp.message(F.text.in_(["ℹ️ Bot haqida", "ℹ️ О боте", "ℹ️ About Bot"]))
 async def about(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(get_text(user_id, "about"), reply_markup=get_menu(user_id))
+
+
+@dp.message(F.text.in_(["📄 PDF yaratish", "📄 Создать PDF", "📄 Create PDF"]))
+async def start_pdf_process(message: types.Message):
+    user_id = message.from_user.id
+    user_images[user_id] = []
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text=get_text(user_id, "btn_finish"), callback_data="generate_pdf")
+    kb.adjust(1)
+    
     await message.answer(
-        "📥 Instagram va YouTube media fayllarini yuklab beruvchi tezkor bot.\n\n"
-        "Bot 24/7 rejimida ishlaydi.",
-        reply_markup=get_menu(),
+        get_text(user_id, "start_pdf"),
+        reply_markup=kb.as_markup()
     )
 
 
-@dp.message(F.text == "📥 Yuklab olish")
-async def ask_link(message: types.Message):
-    await message.answer("Instagram yoki YouTube havolasini yuboring.")
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_images:
+        user_images[user_id] = []
+
+    photo = message.photo[-1]
+    file_info = await bot.get_file(photo.file_id)
+    
+    folder = Path(tempfile.gettempdir()) / f"pdf_bot_{user_id}"
+    folder.mkdir(parents=True, exist_ok=True)
+    
+    file_path = folder / f"{photo.file_unique_id}.jpg"
+    await bot.download_file(file_info.file_path, destination=file_path)
+    
+    user_images[user_id].append(str(file_path))
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text=get_text(user_id, "btn_finish"), callback_data="generate_pdf")
+    kb.adjust(1)
+
+    count = len(user_images[user_id])
+    await message.answer(
+        get_text(user_id, "photo_saved", count=count),
+        reply_markup=kb.as_markup()
+    )
 
 
-@dp.message(F.text)
-async def receive_link(message: types.Message):
-    url = message.text.strip()
+@dp.callback_query(F.data == "generate_pdf")
+async def generate_pdf(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    images = user_images.get(user_id, [])
 
-    if not valid_url(url):
-        await message.answer("❌ To'g'ri Instagram yoki YouTube havolasini yuboring.")
-        return
-
-    host = (urlparse(url).hostname or "").lower()
-    is_instagram = host == "instagram.com" or host.endswith(".instagram.com")
-    is_youtube = host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
-
-    user_urls[message.from_user.id] = url
-
-    if is_instagram:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🎬 Video MP4", callback_data="ig_video")
-        kb.button(text="🎧 Audio", callback_data="ig_audio")
-        kb.adjust(1)
-        await message.answer("Instagram havolasi qabul qilindi. Formatni tanlang:", reply_markup=kb.as_markup())
-
-    elif is_youtube:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="🎬 Video MP4", callback_data="yt_video")
-        kb.button(text="🎵 Qo'shiq / Audio", callback_data="yt_audio")
-        kb.adjust(1)
-        await message.answer("YouTube havolasi qabul qilindi. Formatni tanlang:", reply_markup=kb.as_markup())
-
-
-async def process_instagram(callback: types.CallbackQuery, mode: str):
-    url = user_urls.get(callback.from_user.id)
-    if not url:
-        await callback.answer("Havola topilmadi. Uni qayta yuboring.", show_alert=True)
+    if not images:
+        await callback.answer(get_text(user_id, "no_photos"), show_alert=True)
         return
 
     await callback.answer()
-    status = await callback.message.answer("⏳ Instagram'dan yuklanmoqda, iltimos kuting...")
+    status_msg = await callback.message.answer(get_text(user_id, "processing"))
 
     try:
-        api_url = "https://co.wuk.sh/api/json"
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        payload = {"url": url, "vQuality": "720"}
+        pdf_path = Path(tempfile.gettempdir()) / f"document_{user_id}.pdf"
+        
+        pil_images = []
+        for img_path in images:
+            img = Image.open(img_path)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            pil_images.append(img)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json=payload, headers=headers) as resp:
-                res_data = await resp.json()
+        if pil_images:
+            pil_images[0].save(
+                pdf_path,
+                "PDF",
+                save_all=True,
+                append_images=pil_images[1:]
+            )
 
-        if res_data.get("status") in ("stream", "redirect", "picker"):
-            if res_data.get("status") == "picker":
-                download_url = res_data.get("picker")[0].get("url")
-            else:
-                download_url = res_data.get("url")
+        document = types.FSInputFile(pdf_path, filename="Document.pdf")
+        await callback.message.answer_document(document, caption=get_text(user_id, "success"))
+        await status_msg.delete()
 
-            if download_url:
-                if mode == "video":
-                    await callback.message.answer_video(download_url, caption="🎬 Instagram videosi")
-                else:
-                    await callback.message.answer_audio(download_url, caption="🎵 Instagram audiosi")
-                await status.delete()
-                return
-
-        raise RuntimeError("API orqali olinmadi")
-
-    except Exception:
-        folder = tempfile.mkdtemp(prefix="insta_")
-        try:
-            opts = {
-                "outtmpl": str(folder / "%(id)s.%(ext)s"),
-                "noplaylist": True,
-                "format": "best[ext=mp4]/best" if mode == "video" else "bestaudio/best",
-                "quiet": True,
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-            
-            with open(filename, "rb") as f:
-                if mode == "video":
-                    await callback.message.answer_video(f, caption="🎬 Instagram videosi")
-                else:
-                    await callback.message.answer_audio(f, caption="🎵 Instagram audiosi")
-            await status.delete()
-            shutil.rmtree(folder, ignore_errors=True)
-        except Exception as e:
-            logger.exception("Instagram yuklash xatosi: %s", e)
-            await status.edit_text("❌ Instagram videosini yuklab bo'lmadi. Havola ochiqligini tekshiring.")
-
-
-async def process_youtube(callback: types.CallbackQuery, mode: str):
-    url = user_urls.get(callback.from_user.id)
-    if not url:
-        await callback.answer("Havola topilmadi. Uni qayta yuboring.", show_alert=True)
-        return
-
-    await callback.answer()
-    status = await callback.message.answer("⏳ YouTube'dan yuklanmoqda, iltimos kuting...")
-
-    folder = tempfile.mkdtemp(prefix="youtube_")
-    try:
-        files, title = await asyncio.to_thread(download_youtube, url, mode, folder)
-        for path in files:
-            with path.open("rb") as f:
-                if mode == "video":
-                    await callback.message.answer_video(f, caption=f"🎬 {title[:900]}", supports_streaming=True)
-                else:
-                    await callback.message.answer_audio(f, title=title[:900], caption="🎵 YouTube Audio")
-        await status.delete()
     except Exception as e:
-        logger.exception("YouTube yuklash xatosi: %s", e)
-        await status.edit_text("❌ YouTube'dan yuklab bo'lmadi.")
+        logger.exception("PDF yaratishda xatolik: %s", e)
+        await status_msg.edit_text(get_text(user_id, "error"))
     finally:
-        shutil.rmtree(folder, ignore_errors=True)
-
-
-@dp.callback_query(F.data == "ig_video")
-async def ig_vid(callback: types.CallbackQuery):
-    await process_instagram(callback, "video")
-
-
-@dp.callback_query(F.data == "ig_audio")
-async def ig_aud(callback: types.CallbackQuery):
-    await process_instagram(callback, "audio")
-
-
-@dp.callback_query(F.data == "yt_video")
-async def yt_vid(callback: types.CallbackQuery):
-    await process_youtube(callback, "video")
-
-
-@dp.callback_query(F.data == "yt_audio")
-async def yt_aud(callback: types.CallbackQuery):
-    await process_youtube(callback, "audio")
+        user_images[user_id] = []
+        shutil.rmtree(Path(tempfile.gettempdir()) / f"pdf_bot_{user_id}", ignore_errors=True)
 
 
 async def main():
     keep_alive()
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
     
-    # MUHIM: Eski webhookni butunlay o'chirib tashlash
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
-            logger.info("Webhook tozalandi: %s", await resp.text())
-            
-    await asyncio.sleep(3)
+    await asyncio.sleep(2)
     
     try:
         await dp.start_polling(bot, handle_signals=False)
@@ -279,6 +258,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot to'xtatildi.")
+
 
 
 
