@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import logging
@@ -187,11 +186,9 @@ async def process_instagram(callback: types.CallbackQuery, mode: str):
                 await status.delete()
                 return
 
-        # Agar API orqali olinmasa, zaxira sifatida oddiy yt-dlp ni ishlatib ko'ramiz
         raise RuntimeError("API orqali olinmadi")
 
     except Exception:
-        # Zaxira usul (yt-dlp)
         folder = tempfile.mkdtemp(prefix="insta_")
         try:
             opts = {
@@ -264,6 +261,8 @@ async def yt_aud(callback: types.CallbackQuery):
 
 async def main():
     keep_alive()
+    # Webhookni o'chirib tashlash (Xatolikni oldini olish uchun)
+    await bot.delete_webhook(drop_pending_updates=True)
     try:
         await dp.start_polling(bot)
     finally:
@@ -272,6 +271,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
