@@ -16,11 +16,8 @@ from aiogram.utils.keyboard import (
     InlineKeyboardBuilder,
 )
 
-# TOKEN Render Environment Variables ichida bo'lishi kerak
-TOKEN = os.getenv("BOT_TOKEN", "")
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN kiritilmagan!")
+# Bot tokeningiz to'g'ridan-to'g'ri kiritildi
+TOKEN = "8876050592:AAGm3o9VuHG58deU0nmyhCwABSdV4-XlTMc"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -74,7 +71,7 @@ def download_media(url, mode, folder):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
 
-    # FFmpeg talab qilmaydigan eng xavfsiz va to'g'ridan-to'g'ri yuklash formatlari
+    # yt-dlp sozlamalari (Instagram va YouTube uchun barqaror)
     opts = {
         "outtmpl": str(folder / "%(id)s.%(ext)s"),
         "noplaylist": True,
@@ -90,7 +87,6 @@ def download_media(url, mode, folder):
     if mode == "video":
         opts["format"] = "best[ext=mp4]/best"
     else:
-        # FFmpeg bo'lmasa ham ishlaydigan audio formatlar uchun shartlar
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
 
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -113,7 +109,7 @@ async def start(message: types.Message):
     await message.answer(
         "👋 Assalomu alaykum!\n\n"
         "📸 Instagram videosi va audiosi\n"
-        "🎵 YouTube qo'shiqlarini yuklash\n\n"
+        "🎵 YouTube videolari va qo'shiqlarini yuklash\n\n"
         "Havolani yuboring, keyin kerakli formatni tanlang.",
         reply_markup=get_menu(),
     )
@@ -122,9 +118,7 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ Bot haqida")
 async def about(message: types.Message):
     await message.answer(
-        "📥 Instagram video: MP4\n"
-        "🎧 Instagram audio: MP3/Audio\n"
-        "🎵 YouTube audio/video: Yuklab berish\n\n"
+        "📥 Instagram va YouTube media fayllarini yuklab beruvchi tezkor bot.\n\n"
         "Bot 24/7 rejimida ishlaydi.",
         reply_markup=get_menu(),
     )
@@ -247,6 +241,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
