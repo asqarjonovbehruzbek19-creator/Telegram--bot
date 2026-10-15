@@ -1,7 +1,8 @@
 aiogram
-yt-dlp
-flask
+Flask
 aiohttp
+pillow
+
 
 
 
