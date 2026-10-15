@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import yt_dlp
-import aiohttp
 from flask import Flask
 from threading import Thread
 from aiogram import Bot, Dispatcher, types, F
@@ -20,7 +19,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is running perfectly and ready!"
+    return "Bot is running perfectly!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -31,17 +30,21 @@ def keep_alive():
     t.start()
 # ---------------------------------
 
-def download_video(url):
+def download_media(url):
+    # YouTube va Instagram uchun universal barqaror sozlamalar
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'restrictfilenames': True,
+        'noplaylist': True,
+        # Instagram va boshqa saytlar blokirovkasini chetlab o'tish uchun agent
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     os.makedirs('downloads', exist_ok=True)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-        return filename, info.get('title', 'Video')
+        return filename, info.get('title', 'Media')
 
 def download_audio(url):
     ydl_opts = {
@@ -73,8 +76,8 @@ def get_main_menu():
 async def start_cmd(message: types.Message):
     welcome_text = (
         "🌟 **Assalomu alaykum va rahmatulloh!**\n\n"
-        "Xush kelibsiz! Bu bot orqali siz **YouTube** (video va MP3) hamda **Instagram** (reels, video) havolalarini mutlaqo bepul yuklab olishingiz mumkin. 🎬🎵\n\n"
-        "👇 Boshlash uchun quyidagi tugmani bosing yoki to'g'ridan-to'g'ri havola yuboring!"
+        "Xush kelibsiz! Bu bot orqali siz **YouTube** va **Instagram** havolalarini muammosiz yuklab olishingiz mumkin. 🎬🎵\n\n"
+        "👇 Boshlash uchun pastdagi menyudan foydalaning yoki havola yuboring!"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
@@ -82,8 +85,8 @@ async def start_cmd(message: types.Message):
 async def about_bot(message: types.Message):
     await message.answer(
         "ℹ️ **Bot haqida ma'lumot:**\n\n"
-        "• YouTube va Instagram tarmoqlaridan kontentlarni tezkor yuklaydi.\n"
-        "• 24/7 rejimida uzluksiz ishlaydi.",
+        "• YouTube (video/audio) va Instagram kontentlarini yuklaydi.\n"
+        "• 24/7 rejimida ishlaydi.",
         parse_mode="Markdown",
         reply_markup=get_main_menu()
     )
@@ -91,7 +94,7 @@ async def about_bot(message: types.Message):
 @dp.message(F.text == "🇺🇿 Til: O'zbekcha")
 async def lang_settings(message: types.Message):
     await message.answer(
-        "🇺🇿 Siz allaqachon mukammal **O'zbek tilidasiz!** Barcha xizmatlar o'zbek tilida ko'rsatiladi.",
+        "🇺🇿 Siz allaqachon mukammal **O'zbek tilidasiz!**",
         reply_markup=get_main_menu()
     )
 
@@ -112,52 +115,19 @@ async def handle_text(message: types.Message):
             builder.button(text="🎬 Videoni yuklash (MP4)", callback_data=f"vid|{text}")
             builder.button(text="🎵 Musiqani yuklash (MP3)", callback_data=f"aud|{text}")
             builder.adjust(1)
-            
-            await message.answer(
-                "🎯 **YouTube havolasi qabul qilindi!**\nQaysi formatda yuklab olmoqchisiz?",
-                parse_mode="Markdown",
-                reply_markup=builder.as_markup()
-            )
+            await message.answer("🎯 **YouTube havolasi qabul qilindi!** Formatni tanlang:", parse_mode="Markdown", reply_markup=builder.as_markup())
         elif "instagram.com" in text:
-            status_msg = await message.answer("⏳ **Instagram videosi yuklab olinmoqda...**", parse_mode="Markdown")
-            try:
-                # Instagram uchun barqaror API orqali to'g'ridan-to'g'ri video linkini olish
-                api_url = f"https://api.vkrp.xyz/api/v1/insta?url={text}"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(api_url) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            video_url = data.get("data") or data.get("url")
-                            if video_url:
-                                await message.answer_video(video_url, caption="🎬 **Instagram'dan yuklab olindi!**", parse_mode="Markdown")
-                                await status_msg.delete()
-                                return
-                
-                # Zaxira usul: agar birinchi API ishlamasa, ikkinchi usul orqali urinib ko'ramiz
-                fallback_opts = {'format': 'best', 'outtmpl': 'downloads/%(id)s.%(ext)s', 'restrictfilenames': True}
-                os.makedirs('downloads', exist_ok=True)
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    info = ydl.extract_info(text, download=True)
-                    f_path = ydl.prepare_filename(info)
-                    with open(f_path, 'rb') as v_file:
-                        await message.answer_video(v_file, caption="🎬 **Instagram'dan yuklab olindi!**", parse_mode="Markdown")
-                    await status_msg.delete()
-                    if os.path.exists(f_path):
-                        os.remove(f_path)
-            except Exception as e:
-                await status_msg.edit_text(f"❌ **Instagram videosini yuklab bo'lmadiki:** Havola noto'g'ri yoki yopiq sahifaga tegishli bo'lishi mumkin.", parse_mode="Markdown")
+            # Instagram uchun to'g'ridan-to'g'ri yuklash tugmasi
+            builder = InlineKeyboardBuilder()
+            builder.button(text="📥 Instagram videosini yuklash", callback_data=f"insta|{text}")
+            builder.adjust(1)
+            await message.answer("📸 **Instagram havolasi qabul qilindi!**", parse_mode="Markdown", reply_markup=builder.as_markup())
         else:
-            await message.answer(
-                "⚠️ Hozircha faqat **YouTube** va **Instagram** havolalari qo'llab-quvvatlanadi! 🔗",
-                reply_markup=get_main_menu()
-            )
+            await message.answer("⚠️ Hozircha faqat **YouTube** va **Instagram** havolalari qo'llab-quvvatlanadi! 🔗", reply_markup=get_main_menu())
     else:
-        await message.answer(
-            "⚠️ Iltimos, to'g'ri havola yuboring yoki pastdagi menyulardan foydalaning! 🔗",
-            reply_markup=get_main_menu()
-        )
+        await message.answer("⚠️ Iltimos, to'g'ri havola yuboring yoki pastdagi menyulardan foydalaning! 🔗", reply_markup=get_main_menu())
 
-@dp.callback_query(F.data.startswith("vid|") | F.data.startswith("aud|"))
+@dp.callback_query(F.data.startswith("vid|") | F.data.startswith("aud|") | F.data.startswith("insta|"))
 async def process_download(callback: types.CallbackQuery):
     data_parts = callback.data.split("|", 1)
     action = data_parts[0]
@@ -166,8 +136,8 @@ async def process_download(callback: types.CallbackQuery):
     status_msg = await callback.message.edit_text("⚡ **Yuklab olinmoqda, iltimos biroz kuting...** ⏳", parse_mode="Markdown")
 
     try:
-        if action == "vid":
-            file_path, title = await asyncio.to_thread(download_video, target)
+        if action == "vid" or action == "insta":
+            file_path, title = await asyncio.to_thread(download_media, target)
             with open(file_path, 'rb') as video:
                 await callback.message.answer_video(video, caption=f"🎬 <b>{title}</b>", parse_mode="HTML")
             await status_msg.delete()
@@ -191,8 +161,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
 
