@@ -11,7 +11,7 @@ from telebot import types
 # Logging sozlamalari
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8820793134:AAFqXcnF5Xk_KxHK-3qPx3-y59amLGeUAGQ")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
