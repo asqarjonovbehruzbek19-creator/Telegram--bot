@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- RENDER UCHUN FLASK SERVER (PORT MUAMMOSINI HAL QILADI) ---
+# --- RENDER UCHUN FLASK SERVER ---
 app = Flask('')
 
 @app.route('/')
@@ -28,7 +28,7 @@ def run_flask():
 def keep_alive():
     t = Thread(target=run_flask)
     t.start()
-# -------------------------------------------------------------
+# ---------------------------------
 
 def download_video(url):
     ydl_opts = {
@@ -42,12 +42,7 @@ def download_video(url):
         filename = ydl.prepare_filename(info)
         return filename, info.get('title', 'Video')
 
-def download_audio(url_or_query):
-    if not url_or_query.startswith("http"):
-        search_query = f"ytsearch1:{url_or_query}"
-    else:
-        search_query = url_or_query
-
+def download_audio(url):
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -57,13 +52,10 @@ def download_audio(url_or_query):
         }],
         'outtmpl': 'downloads/%(id)s.%(ext)s',
         'restrictfilenames': True,
-        'default_search': 'auto',
     }
     os.makedirs('downloads', exist_ok=True)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(search_query, download=True)
-        if 'entries' in info:
-            info = info['entries'][0]
+        info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         audio_file = os.path.splitext(filename)[0] + '.mp3'
         return audio_file, info.get('title', 'Musiqa')
@@ -71,7 +63,7 @@ def download_audio(url_or_query):
 def search_songs(query):
     ydl_opts = {
         'extract_flat': True,
-        'default_search': 'ytsearch10',
+        'default_search': 'ytsearch5',
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=False)
@@ -90,31 +82,37 @@ async def handle_text(message: types.Message):
     if text.startswith("http"):
         builder = InlineKeyboardBuilder()
         builder.button(text="🎬 Videoni yuklash", callback_data=f"vid|{text}")
-        builder.button(text="🎵 Qo'shiqni yuklash", callback_data=f"aud|{text}")
+        builder.button(text="🎵 Musiqani yuklash", callback_data=f"aud|{text}")
         builder.adjust(1)
         await message.answer("Yuklab olish turini tanlang:", reply_markup=builder.as_markup())
     else:
-        status_msg = await message.answer("Qidirilmoqda...")
+        status_msg = await message.answer("Qidirilmoqda... 🔍")
         try:
-            results = search_songs(f"ytsearch10:{text}")
+            results = search_songs(text)
             if not results:
                 await bot.edit_message_text("Hech narsa topilmadi.", chat_id=message.chat.id, message_id=status_msg.message_id)
                 return
 
-            response_text = f"'{text}' bo'yicha topilgan variantlar:\n\n"
+            response_text = f"<b>'{text}'</b> bo'yicha topilgan natijalar:\n\n"
             builder = InlineKeyboardBuilder()
 
             for idx, entry in enumerate(results, start=1):
                 title = entry.get('title', 'Nomaʼlum')
-                video_id = entry.get('id')
+                # To'g'ridan-to'g'ri YouTube URL manzilini olamiz
+                url = entry.get('url')
+                if not url:
+                    video_id = entry.get('id')
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+                
                 response_text += f"{idx}. {title}\n"
-                builder.button(text=str(idx), callback_data=f"dl|{video_id}")
+                builder.button(text=f"📥 {idx}-ni yuklab olish", callback_data=f"dl|{url}")
 
-            builder.adjust(5, 5)
+            builder.adjust(1)
             await bot.edit_message_text(
                 response_text,
                 chat_id=message.chat.id,
                 message_id=status_msg.message_id,
+                parse_mode="HTML",
                 reply_markup=builder.as_markup()
             )
         except Exception as e:
@@ -126,7 +124,7 @@ async def process_download(callback: types.CallbackQuery):
     action = data_parts[0]
     target = data_parts[1]
     
-    await callback.message.edit_text("Yuklab olinmoqda...")
+    await callback.message.edit_text("Yuklab olinmoqda, iltimos kuting... ⏳")
 
     try:
         if action == "vid":
@@ -137,17 +135,8 @@ async def process_download(callback: types.CallbackQuery):
             if os.path.exists(file_path):
                 os.remove(file_path)
                 
-        elif action == "aud":
+        elif action == "aud" or action == "dl":
             file_path, title = download_audio(target)
-            with open(file_path, 'rb') as audio:
-                await callback.message.answer_audio(audio, caption=f"🎧 {title}")
-            await callback.message.delete()
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                
-        elif action == "dl":
-            url = f"https://www.youtube.com/watch?v={target}"
-            file_path, title = download_audio(url)
             with open(file_path, 'rb') as audio:
                 await callback.message.answer_audio(audio, caption=f"🎧 {title}")
             await callback.message.delete()
@@ -158,9 +147,10 @@ async def process_download(callback: types.CallbackQuery):
         await callback.message.edit_text(f"Xatolik yuz berdi: {e}")
 
 async def main():
-    keep_alive()  # Flask serverni ishga tushiradi
+    keep_alive()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
