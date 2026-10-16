@@ -1,521 +1,913 @@
 import os
 import re
-import time
+import uuid
 import asyncio
-import logging
 import sqlite3
 import tempfile
-from pathlib import Path
+import threading
+from html import escape
 
 import aiohttp
 from flask import Flask
-from PIL import Image, ImageOps
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pdf2docx import Converter
 
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message, CallbackQuery, KeyboardButton,
-    ReplyKeyboardMarkup, InlineKeyboardButton,
-    InlineKeyboardMarkup
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    FSInputFile,
+    CallbackQuery,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-# ========== SOZLAMALAR ==========
+
+# =====================================
+# SOZLAMALAR
+# =====================================
+
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = {
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",")
+    int(x.strip())
+    for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-MAX_MB = int(os.getenv("MAX_FILE_MB", "40"))
-MAX_BYTES = MAX_MB * 1024 * 1024
-DB = os.getenv("DB_PATH", "bot_data.sqlite3")
-WORK = Path("/tmp/pdf_center")
-WORK.mkdir(parents=True, exist_ok=True)
+MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "40"))
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("pdf-center")
+BASE_DIR = tempfile.gettempdir()
+DB_NAME = "users.db"
+
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+dp = Dispatcher()
 
 app = Flask(__name__)
 
-@app.get("/")
+
+# =====================================
+# WEB SERVER — RENDER UCHUN
+# =====================================
+
+@app.route("/")
 def home():
-    return {"status": "ok", "bot": "PDF Markaz"}, 200
+    return "PDF Center Bot ishlayapti!"
 
-@app.get("/health")
+
+@app.route("/health")
 def health():
-    return "OK", 200
+    return {"status": "ok"}
 
-router = Router()
-dp = Dispatcher()
-dp.include_router(router)
-bot = None
 
-# ========== TUGMALAR ==========
-MERGE = "📚 PDF birlashtirish"
-SPLIT = "✂️ Sahifalarni ajratish"
-COMPRESS = "🗜 PDF siqish"
-IMAGE = "🖼 Rasm → PDF"
-WORD = "📝 PDF → Word"
-BOOKS = "📖 Kitob qidirish"
-HELP = "ℹ️ Yordam"
-ADMIN = "🛠 Admin panel"
-CANCEL = "❌ Bekor qilish"
-DONE = "✅ Tayyor"
+def run_web():
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
 
-MENU = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text=MERGE), KeyboardButton(text=SPLIT)],
-        [KeyboardButton(text=COMPRESS), KeyboardButton(text=IMAGE)],
-        [KeyboardButton(text=WORD), KeyboardButton(text=BOOKS)],
-        [KeyboardButton(text=HELP)],
-    ],
-    resize_keyboard=True
-)
 
-CANCEL_MENU = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text=CANCEL)],
-    ],
-    resize_keyboard=True
-)
+# =====================================
+# MA'LUMOTLAR BAZASI
+# =====================================
+
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY
+            )
+        """)
+
+
+async def add_user(user_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
+            (user_id,)
+        )
+
+
+def get_users():
+    with sqlite3.connect(DB_NAME) as conn:
+        return [
+            row[0]
+            for row in conn.execute("SELECT user_id FROM users")
+        ]
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+
+# =====================================
+# MENYU
+# =====================================
+
+def main_menu(admin=False):
+    buttons = [
+        [KeyboardButton(text="📎 PDF birlashtirish"),
+         KeyboardButton(text="✂️ PDF ajratish")],
+        [KeyboardButton(text="🗜 PDF siqish"),
+         KeyboardButton(text="🖼 Rasm → PDF")],
+        [KeyboardButton(text="📝 PDF → Word"),
+         KeyboardButton(text="📚 Kitob qidirish")],
+        [KeyboardButton(text="❌ Bekor qilish")],
+    ]
+
+    if admin:
+        buttons.append([KeyboardButton(text="⚙️ Admin panel")])
+
+    return ReplyKeyboardMarkup(
+        keyboard=buttons,
+        resize_keyboard=True
+    )
+
+
+# =====================================
+# HOLATLAR
+# =====================================
 
 class Flow(StatesGroup):
     merge = State()
-    split_file = State()
-    split_range = State()
+    split_upload = State()
+    split_pages = State()
     compress = State()
     images = State()
     word = State()
-    books = State()
+    book = State()
     broadcast = State()
 
-# ========== MA'LUMOTLAR BAZASI ==========
-def db_init():
-    with sqlite3.connect(DB) as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS users(
-                user_id INTEGER PRIMARY KEY,
-                joined INTEGER
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS actions(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                action TEXT,
-                created INTEGER
-            )
-        """)
 
-def register(uid):
-    with sqlite3.connect(DB) as c:
-        c.execute(
-            "INSERT OR IGNORE INTO users VALUES(?,?)",
-            (uid, int(time.time()))
-        )
+# =====================================
+# YORDAMCHI FUNKSIYALAR
+# =====================================
 
-def log_action(uid, action):
-    with sqlite3.connect(DB) as c:
-        c.execute(
-            "INSERT INTO actions(user_id,action,created) VALUES(?,?,?)",
-            (uid, action, int(time.time()))
-        )
+async def download_file(file_id, destination):
+    tg_file = await bot.get_file(file_id)
+    await bot.download_file(
+        tg_file.file_path,
+        destination=destination
+    )
+    return destination
 
-def all_users():
-    with sqlite3.connect(DB) as c:
-        return [r[0] for r in c.execute("SELECT user_id FROM users")]
 
-def stats():
-    with sqlite3.connect(DB) as c:
-        users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        actions = c.execute("SELECT COUNT(*) FROM actions").fetchone()[0]
-        active = c.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM actions WHERE created>?",
-            (int(time.time()) - 86400,)
-        ).fetchone()[0]
-    return users, actions, active
-
-def is_admin(uid):
-    return uid in ADMIN_IDS
-
-def folder(uid):
-    p = WORK / str(uid)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def check_size(size):
-    if size and size > MAX_BYTES:
-        raise ValueError(f"Fayl katta. Limit: {MAX_MB} MB.")
-
-def safe_name(name):
-    name = Path(name or "file").name
-    return re.sub(r"[^\w.-]", "_", name)[:80]
-
-async def download_doc(message, dest):
-    doc = message.document
-    if not doc:
-        raise ValueError("Faylni hujjat sifatida yuboring.")
-    check_size(doc.file_size)
-    f = await bot.get_file(doc.file_id)
-    await bot.download_file(f.file_path, destination=dest)
-    return dest
-
-def get_pdf(path):
-    try:
-        reader = PdfReader(str(path))
-        if reader.is_encrypted:
-            raise ValueError("Parol bilan himoyalangan PDF ochilmadi.")
-        if not reader.pages:
-            raise ValueError("PDF ichida sahifa yo‘q.")
-        return reader
-    except ValueError:
-        raise
-    except Exception as e:
-        raise ValueError("PDF fayl buzilgan yoki noto‘g‘ri.") from e
-
-async def send_file(message, path, caption="✅ Tayyor!"):
-    if not path.exists() or path.stat().st_size == 0:
-        raise ValueError("Natija fayli yaratilmadi.")
-    if path.stat().st_size > 49 * 1024 * 1024:
-        raise ValueError("Natija 49 MB dan katta. Kichikroq fayl bilan urinib ko‘ring.")
-    with path.open("rb") as f:
-        await message.answer_document(f, caption=caption)
-
-async def end_flow(message, state):
-    await state.clear()
-    await message.answer("Bosh menyu:", reply_markup=MENU)
-
-# ========== START / YORDAM ==========
-@router.message(CommandStart())
-async def start(message: Message, state: FSMContext):
-    await state.clear()
-    register(message.from_user.id)
-    await message.answer(
-        f"Assalomu alaykum, {message.from_user.first_name or 'do‘st'}! 👋\n\n"
-        "📚 *PDF MARKAZ*\n"
-        "PDF fayllar bilan ishlash va kitob qidirish boti.\n\n"
-        f"📦 Fayl limiti: {MAX_MB} MB\n"
-        "Kerakli xizmatni tanlang:",
-        reply_markup=MENU
+def temp_path(extension):
+    return os.path.join(
+        BASE_DIR,
+        f"{uuid.uuid4().hex}.{extension}"
     )
 
-@router.message(Command("help"))
-@router.message(F.text == HELP)
-async def help_cmd(message: Message):
-    await message.answer(
-        "ℹ️ *Yordam*\n\n"
-        "• PDF birlashtirish — 2 yoki undan ko‘p PDF yuboring.\n"
-        "• Sahifa ajratish — PDF va sahifa raqamlarini kiriting.\n"
-        "• Siqish — PDF ichidagi ma’lumotlarni optimallashtirish.\n"
-        "• Rasm → PDF — rasmlarni yuborib, Tayyor tugmasini bosing.\n"
-        "• PDF → Word — PDF fayl yuboring.\n"
-        "• Kitob qidirish — kitob nomi yoki muallifini yozing.\n\n"
-        "Bekor qilish: /cancel",
-        reply_markup=MENU
-    )
 
-@router.message(Command("cancel"))
-@router.message(F.text == CANCEL)
-async def cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Amal bekor qilindi.", reply_markup=MENU)
-
-# ========== PDF BIRLASHTIRISH ==========
-@router.message(F.text == MERGE)
-async def merge_start(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(Flow.merge)
-    await state.update_data(files=[])
-    await message.answer(
-        "📚 Kamida 2 ta PDF yuboring. Tugatgach «✅ Tayyor» ni bosing.",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text=DONE)],
-                [KeyboardButton(text=CANCEL)]
-            ],
-            resize_keyboard=True
-        )
-    )
-
-@router.message(Flow.merge, F.document)
-async def merge_add(message: Message, state: FSMContext):
-    doc = message.document
-    if not ((doc.file_name or "").lower().endswith(".pdf")
-            or doc.mime_type == "application/pdf"):
-        await message.answer("PDF fayl yuboring.")
-        return
+def remove_file(path):
     try:
-        data = await state.get_data()
-        files = data.get("files", [])
-        path = folder(message.from_user.id) / f"merge_{len(files)}_{safe_name(doc.file_name)}"
-        await download_doc(message, path)
-        get_pdf(path)
-        files.append(str(path))
-        await state.update_data(files=files)
-        await message.answer(f"Qabul qilindi: {len(files)} ta PDF.")
-    except Exception as e:
-        await message.answer(f"❌ {e}")
+        if path and os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
 
-@router.message(Flow.merge, F.text == DONE)
-async def merge_done(message: Message, state: FSMContext):
-    files = (await state.get_data()).get("files", [])
-    if len(files) < 2:
-        await message.answer("Kamida 2 ta PDF kerak.")
-        return
-    try:
-        writer = PdfWriter()
-        for name in files:
-            for page in get_pdf(Path(name)).pages:
-                writer.add_page(page)
-        out = folder(message.from_user.id) / f"merged_{int(time.time())}.pdf"
-        with out.open("wb") as f:
-            writer.write(f)
-        log_action(message.from_user.id, "merge")
-        await send_file(message, out, "✅ PDF fayllar birlashtirildi.")
-    except Exception as e:
-        await message.answer(f"❌ Birlashtirishda xato: {e}")
-    await end_flow(message, state)
 
-# ========== SAHIFA AJRATISH ==========
-@router.message(F.text == SPLIT)
-async def split_start(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(Flow.split_file)
-    await message.answer("Ajratish uchun PDF fayl yuboring.", reply_markup=CANCEL_MENU)
+def check_pdf(path):
+    reader = PdfReader(path)
+    if reader.is_encrypted:
+        raise ValueError("Parol bilan himoyalangan PDF.")
+    return reader
 
-@router.message(Flow.split_file, F.document)
-async def split_receive(message: Message, state: FSMContext):
-    doc = message.document
-    if not ((doc.file_name or "").lower().endswith(".pdf")
-            or doc.mime_type == "application/pdf"):
-        await message.answer("PDF fayl yuboring.")
-        return
-    try:
-        path = folder(message.from_user.id) / f"split_{int(time.time())}.pdf"
-        await download_doc(message, path)
-        reader = get_pdf(path)
-        await state.update_data(path=str(path), pages=len(reader.pages))
-        await state.set_state(Flow.split_range)
-        await message.answer(
-            f"PDF’da {len(reader.pages)} ta sahifa bor.\n"
-            "Kerakli sahifalarni kiriting: `1-3` yoki `1,3,5-7`."
-        )
-    except Exception as e:
-        await message.answer(f"❌ {e}")
 
-def parse_pages(spec, total):
-    result = []
-    for part in spec.replace(" ", "").split(","):
+def parse_pages(text, total):
+    pages = set()
+
+    for part in text.replace(" ", "").split(","):
         if not part:
             continue
+
         if "-" in part:
             a, b = part.split("-", 1)
             start, end = int(a), int(b)
+
             if start > end:
-                raise ValueError("Oraliq noto‘g‘ri.")
-            result.extend(range(start, end + 1))
+                raise ValueError("Sahifa oralig'i noto'g'ri.")
+
+            if start < 1 or end > total:
+                raise ValueError(
+                    f"Sahifalar 1 dan {total} gacha bo'lishi kerak."
+                )
+
+            pages.update(range(start, end + 1))
         else:
-            result.append(int(part))
-    if not result or min(result) < 1 or max(result) > total:
-        raise ValueError(f"Sahifa raqami 1 dan {total} gacha bo‘lishi kerak.")
-    return sorted(set(result))
+            number = int(part)
 
-@router.message(Flow.split_range, F.text)
-async def split_do(message: Message, state: FSMContext):
-    try:
-        data = await state.get_data()
-        reader = get_pdf(Path(data["path"]))
-        pages = parse_pages(message.text, len(reader.pages))
-        writer = PdfWriter()
-        for p in pages:
-            writer.add_page(reader.pages[p - 1])
-        out = folder(message.from_user.id) / f"pages_{int(time.time())}.pdf"
-        with out.open("wb") as f:
-            writer.write(f)
-        log_action(message.from_user.id, "split")
-        await send_file(message, out, f"✅ {len(pages)} ta sahifa ajratildi.")
-    except Exception as e:
-        await message.answer(f"❌ Sahifalarni ajratib bo‘lmadi: {e}")
-        return
-    await end_flow(message, state)
+            if number < 1 or number > total:
+                raise ValueError(
+                    f"Sahifalar 1 dan {total} gacha bo'lishi kerak."
+                )
 
-# ========== PDF SIQISH ==========
-@router.message(F.text == COMPRESS)
-async def compress_start(message: Message, state: FSMContext):
+            pages.add(number)
+
+    if not pages:
+        raise ValueError("Sahifa raqamlarini kiriting.")
+
+    return sorted(pages)
+
+
+def get_document(message):
+    return message.document
+
+
+async def validate_pdf(message, document):
+    if not (document.file_name or "").lower().endswith(".pdf"):
+        await message.answer("❌ PDF fayl yuboring.")
+        return False
+
+    if (
+        document.file_size
+        and document.file_size > MAX_FILE_MB * 1024 * 1024
+    ):
+        await message.answer(
+            f"❌ Fayl hajmi {MAX_FILE_MB} MB dan oshmasin."
+        )
+        return False
+
+    return True
+
+
+# =====================================
+# START
+# =====================================
+
+@dp.message(CommandStart())
+async def start(message: Message, state: FSMContext):
     await state.clear()
-    await state.set_state(Flow.compress)
-    await message.answer("Siqish uchun PDF fayl yuboring.", reply_markup=CANCEL_MENU)
 
-@router.message(Flow.compress, F.document)
-async def compress_do(message: Message, state: FSMContext):
-    doc = message.document
-    if not ((doc.file_name or "").lower().endswith(".pdf")
-            or doc.mime_type == "application/pdf"):
-        await message.answer("PDF fayl yuboring.")
-        return
-    try:
-        src = folder(message.from_user.id) / f"compress_in_{int(time.time())}.pdf"
-        out = folder(message.from_user.id) / f"compressed_{int(time.time())}.pdf"
-        await download_doc(message, src)
-        reader = get_pdf(src)
-        writer = PdfWriter()
-        for page in reader.pages:
-            try:
-                page.compress_content_streams()
-            except Exception:
-                pass
-            writer.add_page(page)
-        with out.open("wb") as f:
-            writer.write(f)
-        before, after = src.stat().st_size, out.stat().st_size
-        log_action(message.from_user.id, "compress")
-        note = "PDF optimallashtirildi."
-        if after < before:
-            note += f" Hajmi: {before // 1024} KB → {after // 1024} KB."
-        else:
-            note += " Hajmi kamaymadi; PDF allaqachon optimallashgan bo‘lishi mumkin."
-        await send_file(message, out, "✅ " + note)
-    except Exception as e:
-        await message.answer(f"❌ Siqishda xato: {e}")
-    await end_flow(message, state)
+    if message.from_user:
+        await add_user(message.from_user.id)
 
-# ========== RASM -> PDF ==========
-@router.message(F.text == IMAGE)
-async def image_start(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(Flow.images)
-    await state.update_data(images=[])
     await message.answer(
-        "JPG yoki PNG rasmlarni yuboring. Tugatgach «✅ Tayyor» ni bosing.",
-        reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text=DONE)],
-                [KeyboardButton(text=CANCEL)]
-            ],
-            resize_keyboard=True
+        "📚 <b>PDF Center botiga xush kelibsiz!</b>\n\n"
+        "Quyidagi xizmatlardan foydalaning.",
+        reply_markup=main_menu(
+            is_admin(message.from_user.id)
+            if message.from_user else False
         )
     )
 
-@router.message(Flow.images, F.photo)
-async def image_add_photo(message: Message, state: FSMContext):
-    try:
-        data = await state.get_data()
-        images = data.get("images", [])
-        path = folder(message.from_user.id) / f"image_{len(images)}_{int(time.time())}.jpg"
-        f = await bot.get_file(message.photo[-1].file_id)
-        await bot.download_file(f.file_path, destination=path)
-        images.append(str(path))
-        await state.update_data(images=images)
-        await message.answer(f"Rasm olindi. Jami: {len(images)} ta.")
-    except Exception as e:
-        await message.answer(f"❌ {e}")
 
-@router.message(Flow.images, F.document)
-async def image_add_doc(message: Message, state: FSMContext):
-    doc = message.document
-    if not (doc.mime_type or "").startswith("image/"):
-        await message.answer("Rasm fayl yuboring.")
-        return
-    try:
-        data = await state.get_data()
-        images = data.get("images", [])
-        path = folder(message.from_user.id) / f"image_{len(images)}_{safe_name(doc.file_name)}"
-        await download_doc(message, path)
-        with Image.open(path) as im:
-            im.verify()
-        images.append(str(path))
-        await state.update_data(images=images)
-        await message.answer(f"Rasm olindi. Jami: {len(images)} ta.")
-    except Exception as e:
-        await message.answer(f"❌ Rasmni o‘qib bo‘lmadi: {e}")
+@dp.message(Command("help"))
+async def help_command(message: Message):
+    await message.answer(
+        "📎 PDF birlashtirish\n"
+        "✂️ PDF sahifalarini ajratish\n"
+        "🗜 PDF siqish\n"
+        "🖼 Rasmlardan PDF yaratish\n"
+        "📝 PDFni Wordga aylantirish\n"
+        "📚 Kitob qidirish\n\n"
+        "Bekor qilish uchun /cancel yuboring."
+    )
 
-@router.message(Flow.images, F.text == DONE)
-async def image_done(message: Message, state: FSMContext):
-    images = (await state.get_data()).get("images", [])
-    if not images:
-        await message.answer("Avval rasm yuboring.")
+
+@dp.message(Command("cancel"))
+@dp.message(F.text == "❌ Bekor qilish")
+async def cancel(message: Message, state: FSMContext):
+    data = await state.get_data()
+
+    for key in ("pdf_paths", "image_paths"):
+        for path in data.get(key, []):
+            remove_file(path)
+
+    for key in ("pdf_path",):
+        remove_file(data.get(key))
+
+    await state.clear()
+
+    await message.answer(
+        "❌ Amal bekor qilindi.",
+        reply_markup=main_menu(
+            is_admin(message.from_user.id)
+            if message.from_user else False
+        )
+    )
+
+
+# =====================================
+# PDF BIRLASHTIRISH
+# =====================================
+
+@dp.message(F.text == "📎 PDF birlashtirish")
+async def merge_start(message: Message, state: FSMContext):
+    await state.set_state(Flow.merge)
+    await state.update_data(pdf_paths=[])
+
+    await message.answer(
+        "Birlashtiriladigan PDF fayllarni birma-bir yuboring.\n"
+        "Tugatgach, TAYYOR deb yozing."
+    )
+
+
+@dp.message(Flow.merge, F.document)
+async def merge_receive(
+    message: Message,
+    state: FSMContext
+):
+    document = message.document
+
+    if not await validate_pdf(message, document):
         return
+
+    path = temp_path("pdf")
+
+    try:
+        await download_file(document.file_id, path)
+        check_pdf(path)
+
+        data = await state.get_data()
+        paths = data.get("pdf_paths", [])
+        paths.append(path)
+
+        await state.update_data(pdf_paths=paths)
+
+        await message.answer(
+            f"✅ Fayl qabul qilindi. Jami: {len(paths)} ta.\n"
+            "Yana PDF yuboring yoki TAYYOR deb yozing."
+        )
+    except Exception:
+        remove_file(path)
+        await message.answer("❌ PDF faylni o'qib bo'lmadi.")
+
+
+@dp.message(Flow.merge, F.text)
+async def merge_finish(message: Message, state: FSMContext):
+    if (message.text or "").strip().upper() != "TAYYOR":
+        await message.answer("PDF yuboring yoki TAYYOR deb yozing.")
+        return
+
+    data = await state.get_data()
+    paths = data.get("pdf_paths", [])
+
+    if len(paths) < 2:
+        await message.answer("Kamida 2 ta PDF kerak.")
+        return
+
+    output = temp_path("pdf")
+
+    try:
+        writer = PdfWriter()
+
+        for path in paths:
+            reader = check_pdf(path)
+            for page in reader.pages:
+                writer.add_page(page)
+
+        with open(output, "wb") as file:
+            writer.write(file)
+
+        await message.answer_document(
+            FSInputFile(output, filename="birlashtirilgan.pdf"),
+            caption="✅ PDF fayllar birlashtirildi."
+        )
+
+    except Exception:
+        await message.answer("❌ Birlashtirishda xatolik.")
+
+    finally:
+        for path in paths:
+            remove_file(path)
+        remove_file(output)
+        await state.clear()
+
+
+# =====================================
+# PDF SAHIFALARINI AJRATISH
+# =====================================
+
+@dp.message(F.text == "✂️ PDF ajratish")
+async def split_start(message: Message, state: FSMContext):
+    await state.set_state(Flow.split_upload)
+
+    await message.answer("Sahifalarini ajratmoqchi bo'lgan PDFni yuboring.")
+
+
+@dp.message(Flow.split_upload, F.document)
+async def split_receive(
+    message: Message,
+    state: FSMContext
+):
+    document = message.document
+
+    if not await validate_pdf(message, document):
+        return
+
+    path = temp_path("pdf")
+
+    try:
+        await download_file(document.file_id, path)
+        reader = check_pdf(path)
+
+        await state.update_data(
+            pdf_path=path,
+            total_pages=len(reader.pages)
+        )
+        await state.set_state(Flow.split_pages)
+
+        await message.answer(
+            f"PDFda {len(reader.pages)} ta sahifa bor.\n\n"
+            "Kerakli sahifalarni yozing.\n"
+            "Misol: <code>1-3,5,7</code>"
+        )
+
+    except Exception:
+        remove_file(path)
+        await message.answer("❌ PDFni o'qib bo'lmadi.")
+
+
+@dp.message(Flow.split_pages, F.text)
+async def split_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    source = data.get("pdf_path")
+    total = data.get("total_pages", 0)
+
+    if not source or not os.path.exists(source):
+        await message.answer("PDF topilmadi. Qaytadan yuboring.")
+        await state.clear()
+        return
+
+    output = None
+
+    try:
+        pages = parse_pages(message.text or "", total)
+
+        reader = check_pdf(source)
+        writer = PdfWriter()
+
+        for number in pages:
+            writer.add_page(reader.pages[number - 1])
+
+        output = temp_path("pdf")
+
+        with open(output, "wb") as file:
+            writer.write(file)
+
+        await message.answer_document(
+            FSInputFile(output, filename="ajratilgan.pdf"),
+            caption="✅ Sahifalar ajratildi."
+        )
+
+        remove_file(source)
+        await state.clear()
+
+    except ValueError as error:
+        await message.answer(
+            f"❌ {escape(str(error))}\n"
+            "Masalan: <code>1-3,5</code>"
+        )
+
+    except Exception:
+        await message.answer("❌ Sahifalarni ajratib bo'lmadi.")
+
+    finally:
+        remove_file(output)
+
+
+# =====================================
+# PDF SIQISH
+# =====================================
+
+@dp.message(F.text == "🗜 PDF siqish")
+async def compress_start(message: Message, state: FSMContext):
+    await state.set_state(Flow.compress)
+    await message.answer("Siqmoqchi bo'lgan PDF faylni yuboring.")
+
+
+@dp.message(Flow.compress, F.document)
+async def compress_pdf(
+    message: Message,
+    state: FSMContext
+):
+    document = message.document
+
+    if not await validate_pdf(message, document):
+        return
+
+    source = temp_path("pdf")
+    output = temp_path("pdf")
+
+    try:
+        await download_file(document.file_id, source)
+        reader = check_pdf(source)
+        writer = PdfWriter()
+
+        for page in reader.pages:
+            page.compress_content_streams()
+            writer.add_page(page)
+
+        with open(output, "wb") as file:
+            writer.write(file)
+
+        old_size = os.path.getsize(source) / 1024
+        new_size = os.path.getsize(output) / 1024
+
+        await message.answer_document(
+            FSInputFile(output, filename="siqilgan.pdf"),
+            caption=(
+                "✅ PDF qayta saqlandi.\n"
+                f"Oldingi hajm: {old_size:.1f} KB\n"
+                f"Yangi hajm: {new_size:.1f} KB\n\n"
+                "Eslatma: rasmlarni kuchli siqish bu usulda mavjud emas."
+            )
+        )
+
+    except Exception:
+        await message.answer("❌ PDFni siqib bo'lmadi.")
+
+    finally:
+        remove_file(source)
+        remove_file(output)
+        await state.clear()
+
+
+# =====================================
+# RASMLARNI PDF QILISH
+# =====================================
+
+@dp.message(F.text == "🖼 Rasm → PDF")
+async def images_start(message: Message, state: FSMContext):
+    await state.set_state(Flow.images)
+    await state.update_data(image_paths=[])
+
+    await message.answer(
+        "Rasmlarni birma-bir yuboring.\n"
+        "Tugatgach, TAYYOR deb yozing."
+    )
+
+
+@dp.message(Flow.images, F.photo)
+async def image_receive_photo(message: Message, state: FSMContext):
+    photo = message.photo[-1]
+    path = temp_path("jpg")
+
+    try:
+        await download_file(photo.file_id, path)
+
+        data = await state.get_data()
+        paths = data.get("image_paths", [])
+        paths.append(path)
+
+        await state.update_data(image_paths=paths)
+        await message.answer(
+            f"✅ Rasm qabul qilindi. Jami: {len(paths)} ta."
+        )
+    except Exception:
+        remove_file(path)
+        await message.answer("❌ Rasmni yuklab bo'lmadi.")
+
+
+@dp.message(Flow.images, F.document)
+async def image_receive_document(
+    message: Message,
+    state: FSMContext
+):
+    document = message.document
+
+    if not document:
+        return
+
+    name = (document.file_name or "").lower()
+
+    if not name.endswith((".jpg", ".jpeg", ".png", ".webp")):
+        await message.answer("JPG, PNG yoki WEBP rasm yuboring.")
+        return
+
+    if (
+        document.file_size
+        and document.file_size > MAX_FILE_MB * 1024 * 1024
+    ):
+        await message.answer("❌ Rasm juda katta.")
+        return
+
+    path = temp_path("img")
+
+    try:
+        await download_file(document.file_id, path)
+
+        # Fayl haqiqatan rasm ekanini tekshirish.
+        with Image.open(path) as image:
+            image.verify()
+
+        data = await state.get_data()
+        paths = data.get("image_paths", [])
+        paths.append(path)
+
+        await state.update_data(image_paths=paths)
+        await message.answer(
+            f"✅ Rasm qabul qilindi. Jami: {len(paths)} ta."
+        )
+    except Exception:
+        remove_file(path)
+        await message.answer("❌ Rasmni o'qib bo'lmadi.")
+
+
+@dp.message(Flow.images, F.text)
+async def images_finish(message: Message, state: FSMContext):
+    if (message.text or "").strip().upper() != "TAYYOR":
+        await message.answer("Rasm yuboring yoki TAYYOR deb yozing.")
+        return
+
+    data = await state.get_data()
+    paths = data.get("image_paths", [])
+
+    if not paths:
+        await message.answer("Avval kamida bitta rasm yuboring.")
+        return
+
+    output = temp_path("pdf")
+
     try:
         converted = []
-        for name in images:
-            with Image.open(name) as im:
-                converted.append(ImageOps.exif_transpose(im).convert("RGB"))
-        out = folder(message.from_user.id) / f"images_{int(time.time())}.pdf"
+
+        for path in paths:
+            with Image.open(path) as image:
+                converted.append(image.convert("RGB").copy())
+
         converted[0].save(
-            out, save_all=True, append_images=converted[1:],
-            resolution=150.0
+            output,
+            save_all=True,
+            append_images=converted[1:]
         )
-        for im in converted:
-            im.close()
-        log_action(message.from_user.id, "image_to_pdf")
-        await send_file(message, out, f"✅ {len(images)} ta rasm PDF qilindi.")
-    except Exception as e:
-        await message.answer(f"❌ PDF yaratilmadi: {e}")
-    await end_flow(message, state)
 
-# ========== PDF -> WORD ==========
-@router.message(F.text == WORD)
+        for image in converted:
+            image.close()
+
+        await message.answer_document(
+            FSInputFile(output, filename="rasmlardan.pdf"),
+            caption="✅ Rasmlar PDFga aylantirildi."
+        )
+
+    except Exception:
+        await message.answer("❌ Rasmlardan PDF yaratilmadi.")
+
+    finally:
+        for path in paths:
+            remove_file(path)
+        remove_file(output)
+        await state.clear()
+
+
+# =====================================
+# PDF → WORD
+# =====================================
+
+@dp.message(F.text == "📝 PDF → Word")
 async def word_start(message: Message, state: FSMContext):
-    await state.clear()
     await state.set_state(Flow.word)
-    await message.answer("Word’ga aylantirish uchun PDF yuboring.", reply_markup=CANCEL_MENU)
+    await message.answer("Wordga aylantirish uchun PDF yuboring.")
 
-@router.message(Flow.word, F.document)
-async def word_do(message: Message, state: FSMContext):
-    doc = message.document
-    if not ((doc.file_name or "").lower().endswith(".pdf")
-            or doc.mime_type == "application/pdf"):
-        await message.answer("PDF fayl yuboring.")
+
+@dp.message(Flow.word, F.document)
+async def word_convert(message: Message, state: FSMContext):
+    document = message.document
+
+    if not await validate_pdf(message, document):
         return
+
+    source = temp_path("pdf")
+    output = temp_path("docx")
+
     try:
-        src = folder(message.from_user.id) / f"word_{int(time.time())}.pdf"
-        out = folder(message.from_user.id) / f"word_{int(time.time())}.docx"
-        await download_doc(message, src)
-        get_pdf(src)
-        await message.answer("⏳ Word fayli tayyorlanmoqda...")
+        await download_file(document.file_id, source)
+        check_pdf(source)
+
         def convert():
-            cv = Converter(str(src))
+            converter = Converter(source)
             try:
-                cv.convert(str(out))
+                converter.convert(output)
             finally:
-                cv.close()
+                converter.close()
+
         await asyncio.to_thread(convert)
-        log_action(message.from_user.id, "pdf_to_word")
-        await send_file(message, out, "✅ Word tayyor. Skanerlangan PDF’da natija farq qilishi mumkin.")
-    except Exception as e:
-        log.exception("PDF to Word error")
-        await message.answer(f"❌ Word’ga aylantirishda xato: {e}")
-    await end_flow(message, state)
 
-# ========== KITOB QIDIRISH ==========
-@router.message(F.text == BOOKS)
-async def books_start(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(Flow.books)
-    await message.answer("Kitob nomi yoki muallifini yozing.", reply_markup=CANCEL_MENU)
+        await message.answer_document(
+            FSInputFile(output, filename="word_hujjat.docx"),
+            caption="✅ Word fayli tayyor."
+        )
 
-@router.message(Flow.books, F.text)
-async def books_search(message: Message, state: FSMContext):
-    query = message.text.strip()
+    except Exception:
+        await message.answer(
+            "❌ Konvertatsiya amalga oshmadi. "
+            "Ayrim skanerlangan PDFlar to'g'ri o'girilmasligi mumkin."
+        )
+
+    finally:
+        remove_file(source)
+        remove_file(output)
+        await state.clear()
+
+
+# =====================================
+# KITOB QIDIRISH
+# =====================================
+
+@dp.message(F.text == "📚 Kitob qidirish")
+async def book_start(message: Message, state: FSMContext):
+    await state.set_state(Flow.book)
+    await message.answer("Kitob nomini yozing.")
+
+
+@dp.message(Flow.book, F.text)
+async def book_search(message: Message, state: FSMContext):
+    query = (message.text or "").strip()
+
     if len(query) < 2:
-        await message.answer("Kamida 2 ta harf yozing.")
+        await message.answer("Kitob nomini to'liqroq yozing.")
         return
+
+    url = "https://openlibrary.org/search.json"
+
     try:
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=15)
+
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
-                "https://openlibrary.org/search.json",
-                params={"q": query, "limit": 5}
+                url,
+                params={"title": query, "limit": 5}
             ) as response:
                 if response.status != 200:
-                    raise RuntimeError("Kitob katalogi ho
+                    await message.answer("Qidiruv xizmati vaqtincha ishlamayapti.")
+                    return
+
+                data = await response.json()
+
+        books = data.get("docs", [])
+
+        if not books:
+            await message.answer("📚 Kitob topilmadi.")
+            return
+
+        results = []
+
+        for book in books[:5]:
+            title = escape(book.get("title", "Nomsiz"))
+            authors = book.get("author_name", ["Noma'lum muallif"])
+            author = escape(", ".join(authors[:2]))
+            year = book.get("first_publish_year", "Noma'lum")
+
+            key = book.get("key", "")
+            link = (
+                "https://openlibrary.org" + key
+                if key.startswith("/works/")
+                else "https://openlibrary.org"
+            )
+
+            results.append(
+                f"📖 <b>{title}</b>\n"
+                f"✍️ {author}\n"
+                f"📅 {year}\n"
+                f"🔗 {link}"
+            )
+
+        await message.answer("\n\n".join(results))
+
+    except Exception:
+        await message.answer("❌ Kitob qidirishda xatolik yuz berdi.")
+
+    finally:
+        await state.clear()
 
 
+# =====================================
+# ADMIN PANEL
+# =====================================
+
+@dp.message(Command("admin"))
+@dp.message(F.text == "⚙️ Admin panel")
+async def admin_panel(message: Message):
+    if not message.from_user or not is_admin(message.from_user.id):
+        await message.answer("⛔ Siz admin emassiz.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📊 Statistika", callback_data="admin_stats")
+    builder.button(text="📢 Xabar yuborish", callback_data="admin_broadcast")
+    builder.adjust(1)
+
+    await message.answer(
+        "⚙️ <b>Admin panel</b>\nKerakli amalni tanlang:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+
+    users = get_users()
+
+    await callback.message.answer(
+        f"📊 <b>Bot statistikasi</b>\n\n"
+        f"👥 Foydalanuvchilar: {len(users)}"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    if not callback.from_user or not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+
+    await state.set_state(Flow.broadcast)
+
+    await callback.message.answer(
+        "📢 Barcha foydalanuvchilarga yuboriladigan matnni yozing.\n"
+        "Bekor qilish uchun /cancel yuboring."
+    )
+    await callback.answer()
+
+
+@dp.message(Flow.broadcast, F.text)
+async def admin_broadcast_send(
+    message: Message,
+    state: FSMContext
+):
+    if not message.from_user or not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+
+    if not text:
+        await message.answer("Xabar bo'sh bo'lmasin.")
+        return
+
+    sent = 0
+    failed = 0
+
+    for user_id in get_users():
+        try:
+            await bot.send_message(user_id, escape(text))
+            sent += 1
+        except Exception:
+            failed += 1
+
+        await asyncio.sleep(0.04)
+
+    await state.clear()
+
+    await message.answer(
+        "📢 Yuborish yakunlandi.\n\n"
+        f"✅ Yuborildi: {sent}\n"
+        f"❌ Yuborilmadi: {failed}"
+    )
+
+
+# =====================================
+# XATOLIKLAR
+# =====================================
+
+@dp.message()
+async def unknown_message(message: Message):
+    await message.answer(
+        "Menyudan xizmatni tanlang yoki /help buyrug'ini yuboring.",
+        reply_markup=main_menu(
+            is_admin(message.from_user.id)
+            if message.from_user else False
+        )
+    )
+
+
+# =====================================
+# BOTNI ISHGA TUSHIRISH
+# =====================================
+
+async def run_bot():
+    if not TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN topilmadi. Render Environment bo'limiga qo'shing."
+        )
+
+    init_db()
+
+    # Webhook yoqilgan bo'lsa, polling bilan to'qnashmasligi uchun o'chirish.
+    await bot.delete_webhook(drop_pending_updates=False)
+
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    threading.Thread(
+        target=run_web,
+        daemon=True
+    ).start()
+
+    asyncio.run(run_bot())
 
 
 
