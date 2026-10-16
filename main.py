@@ -1,250 +1,264 @@
-import io
-import logging
 import os
-import sqlite3
+import asyncio
+import logging
+import tempfile
+import shutil
+from pathlib import Path
 from threading import Thread
+
+import aiohttp
 from flask import Flask
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from PIL import Image
-import telebot
-from telebot import types
 
-# Logging sozlamalari
+TOKEN = "8820793134:AAFqXcnF5Xk_KxHK-3qPx3-y59amLGeUAGQ"
+
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8820793134:AAFqXcnF5Xk_KxHK-3qPx3-y59amLGeUAGQ")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+app = Flask(__name__)
 
-# Foydalanuvchilar tili va yuklanayotgan rasmlarni saqlash uchun lug'atlar
+# Foydalanuvchi ma'lumotlari: tili va rasmlari
 user_languages = {}
 user_images = {}
 
-# --- BAZA (SQLite) ---
-def init_db():
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-  conn.commit()
-  conn.close()
-
-def add_user(user_id):
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-  conn.commit()
-  conn.close()
-
-def get_user_count():
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  cursor.execute("SELECT COUNT(*) FROM users")
-  count = cursor.fetchone()[0]
-  conn.close()
-  return count
-
-init_db()
-
-# Flask Server (Render uchun)
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-  return "PDF Converter Bot is Alive!"
-
-def run_flask():
-  port = int(os.environ.get("PORT", 8080))
-  app.run(host="0.0.0.0", port=port)
-
-# Matnlar lug'ati
-TEXTS = {
+# --- LUG'ATLAR (Tarjimalar) ---
+LANGS = {
     "uz": {
-        "welcome": "👋 <b>Assalomu alaykum!</b>\n\nMen <b>PDF Pro Bot</b>man. Kerakli xizmatni tanlang:",
-        "btn_img2pdf": "🖼️ Rasmlarni PDF qilish",
-        "btn_lang": "🌐 Til / Language",
-        "send_images": "🖼️ Menga PDF-ga aylantirmoqchi bo'lgan rasmlaringizni birma-bir yuboring.\n\nTugatgach, <b>'🏁 PDF yaratish'</b> tugmasini bosing.",
-        "btn_make_pdf": "🏁 PDF yaratish",
-        "btn_back": "⬅️ Orqaga",
-        "no_images": "⚠️ Siz hali birorta ham rasm yubormadingiz!",
-        "converting": "⏳ PDF fayl tayyorlanmoqda, kuting...",
-        "success_pdf": "🎉 Barchasi tayyor! Hujjatingiz yuklandi.",
-        "lang_changed": "✅ Til O'zbek tiliga o'zgartirildi!"
+        "welcome": "👋 Assalomu alaykum!\n\n📸 Men yuborgan rasmlaringizni bitta **PDF** hujjatiga jamlab beruvchi botman.\n\nTilni tanlang:",
+        "about": "📄 **PDF Maker Bot**\n\nBir nechta rasmlarni yuborib, ulardan tezda sifatli PDF fayl hosil qiling.",
+        "btn_create": "📄 PDF yaratish",
+        "btn_lang": "🌍 Tilni o'zgartirish",
+        "btn_about": "ℹ️ Bot haqida",
+        "ask_lang": "Tilni tanlang / Выберите язык / Choose language:",
+        "lang_changed": "✅ Til O'zbek tiliga o'zgartirildi!",
+        "start_pdf": "📷 Rasmlarni birma-bir yoki guruhlab yuboring.\n\nBarcha rasmlarni yuborib bo'lgach, tugmani bosing:",
+        "btn_finish": "✅ PDF yaratishni yakunlash",
+        "photo_saved": "✅ Rasm qabul qilindi! Jami rasmlar: {count} ta.\n\nYana rasm yuborishingiz yoki tugmani bosishingiz mumkin:",
+        "no_photos": "❌ Hali hech qanday rasm yubormadingiz!",
+        "processing": "⏳ Rasmlar PDF formatiga o'tkazilmoqda, iltimos kuting...",
+        "success": "📄 Mana sizning PDF hujjatingiz!",
+        "error": "❌ PDF yaratishda xatolik yuz berdi. Qaytadan urinib ko'ring."
     },
     "ru": {
-        "welcome": "👋 <b>Здравствуйте!</b>\n\nЯ <b>PDF Pro Bot</b>. Выберите нужную услугу:",
-        "btn_img2pdf": "🖼️ Изображения в PDF",
-        "btn_lang": "🌐 Til / Language",
-        "send_images": "🖼️ Отправляйте изображения по одному.\n\nКогда закончите, нажмите <b>'🏁 Создать PDF'</b>.",
-        "btn_make_pdf": "🏁 Создать PDF",
-        "btn_back": "⬅️ Назад",
-        "no_images": "⚠️ Вы еще не отправили ни одного изображения!",
-        "converting": "⏳ Генерируется PDF файл, подождите...",
-        "success_pdf": "🎉 Готово! Ваш документ сгенерирован.",
-        "lang_changed": "✅ Язык изменен на русский!"
+        "welcome": "👋 Здравствуйте!\n\n📸 Я бот, который объединяет ваши фотографии в один документ **PDF**.\n\nВыберите язык:",
+        "about": "📄 **PDF Maker Bot**\n\nОтправляйте фотографии и быстро создавайте качественные PDF файлы.",
+        "btn_create": "📄 Создать PDF",
+        "btn_lang": "🌍 Изменить язык",
+        "btn_about": "ℹ️ О боте",
+        "ask_lang": "Выберите язык / Choose language / Tilni tanlang:",
+        "lang_changed": "✅ Язык изменен на русский!",
+        "start_pdf": "📷 Отправляйте фотографии по одной или альбомом.\n\nПосле отправки всех фото нажмите кнопку:",
+        "btn_finish": "✅ Завершить создание PDF",
+        "photo_saved": "✅ Фото принято! Всего фото: {count}.\n\nМожете отправить еще или нажать кнопку:",
+        "no_photos": "❌ Вы еще не отправили ни одной фотографии!",
+        "processing": "⏳ Фотографии конвертируются в PDF, пожалуйста, подождите...",
+        "success": "📄 Вот ваш PDF документ!",
+        "error": "❌ Произошла ошибка при создании PDF. Попробуйте еще раз."
     },
     "en": {
-        "welcome": "👋 <b>Hello!</b>\n\nI am <b>PDF Pro Bot</b>. Choose a service:",
-        "btn_img2pdf": "🖼️ Images to PDF",
-        "btn_lang": "🌐 Til / Language",
-        "send_images": "🖼️ Send your images one by one.\n\nWhen finished, press <b>'🏁 Generate PDF'</b>.",
-        "btn_make_pdf": "🏁 Generate PDF",
-        "btn_back": "⬅️ Back",
-        "no_images": "⚠️ You haven't sent any images yet!",
-        "converting": "⏳ Generating PDF file, please wait...",
-        "success_pdf": "🎉 All done! Your document is ready.",
-        "lang_changed": "✅ Language changed to English!"
+        "welcome": "👋 Hello!\n\n📸 I am a bot that converts your sent images into a single **PDF** document.\n\nChoose your language:",
+        "about": "📄 **PDF Maker Bot**\n\nSend multiple images and quickly generate high-quality PDF files.",
+        "btn_create": "📄 Create PDF",
+        "btn_lang": "🌍 Change Language",
+        "btn_about": "ℹ️ About Bot",
+        "ask_lang": "Choose language / Tilni tanlang / Выберите язык:",
+        "lang_changed": "✅ Language changed to English!",
+        "start_pdf": "📷 Send photos one by one or as an album.\n\nAfter sending all photos, click the button below:",
+        "btn_finish": "✅ Finish and Create PDF",
+        "photo_saved": "✅ Photo accepted! Total photos: {count}.\n\nYou can send more or click the button:",
+        "no_photos": "❌ You haven't sent any photos yet!",
+        "processing": "⏳ Converting images to PDF, please wait...",
+        "success": "📄 Here is your PDF document!",
+        "error": "❌ An error occurred while creating PDF. Please try again."
     }
 }
 
-def get_main_keyboard(lang):
-  t = TEXTS.get(lang, TEXTS["uz"])
-  kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-  kb.add(
-      types.KeyboardButton(t["btn_img2pdf"]),
-      types.KeyboardButton(t["btn_lang"])
-  )
-  return kb
+def get_text(user_id, key, **kwargs):
+    lang = user_languages.get(user_id, "uz")
+    text = LANGS.get(lang, LANGS["uz"]).get(key, key)
+    return text.format(**kwargs)
 
-def get_language_inline():
-  kb = types.InlineKeyboardMarkup(row_width=3)
-  kb.add(
-      types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data="lang_uz"),
-      types.InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
-      types.InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
-  )
-  return kb
+def get_menu(user_id):
+    kb = ReplyKeyboardBuilder()
+    kb.button(text=get_text(user_id, "btn_create"))
+    kb.button(text=get_text(user_id, "btn_lang"))
+    kb.button(text=get_text(user_id, "btn_about"))
+    kb.adjust(2, 1)
+    return kb.as_markup(resize_keyboard=True)
 
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-  user_id = message.from_user.id
-  add_user(user_id)
-  
-  if user_id not in user_languages:
-    bot.send_message(
-        message.chat.id,
-        "🌐 Select Language / Tilni tanlang / Выберите язык:",
-        reply_markup=get_language_inline()
+def get_lang_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇺🇿 O'zbekcha", callback_data="lang_uz")
+    kb.button(text="🇷🇺 Русский", callback_data="lang_ru")
+    kb.button(text="🇬🇧 English", callback_data="lang_en")
+    kb.adjust(3)
+    return kb.as_markup()
+
+
+@app.route("/")
+def home():
+    return "Multilingual PDF Bot ishlayapti!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    Thread(target=run_flask, daemon=True).start()
+
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_languages:
+        user_languages[user_id] = "uz" # Standart til
+    
+    await message.answer(
+        get_text(user_id, "welcome"),
+        reply_markup=get_lang_keyboard()
     )
-  else:
-    lang = user_languages[user_id]
-    bot.send_message(
-        message.chat.id,
-        TEXTS[lang]["welcome"],
-        reply_markup=get_main_keyboard(lang)
+    await message.answer("Menu:", reply_markup=get_menu(user_id))
+
+
+@dp.callback_query(F.data.startswith("lang_"))
+async def change_language(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    new_lang = callback.data.split("_")[1]
+    user_languages[user_id] = new_lang
+    
+    await callback.answer(get_text(user_id, "lang_changed"), show_alert=True)
+    await callback.message.edit_text(
+        get_text(user_id, "welcome"),
+        reply_markup=get_lang_keyboard()
     )
+    # Menuni yangi tilda yangilash uchun xabar yuboramiz
+    await callback.message.answer("Menu:", reply_markup=get_menu(user_id))
 
-@bot.message_handler(commands=["stats"])
-def cmd_stats(message):
-  if message.from_user.id == ADMIN_ID:
-    count = get_user_count()
-    bot.send_message(message.chat.id, f"📊 <b>Botdagi jami obunachilar soni:</b> {count} ta")
-  else:
-    bot.send_message(message.chat.id, "❌ Bu buyruq faqat admin uchun!")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
-def callback_language(call):
-  user_id = call.from_user.id
-  lang = call.data.split("_")[1]
-  user_languages[user_id] = lang
-  
-  bot.answer_callback_query(call.id)
-  bot.delete_message(call.message.chat.id, call.message.message_id)
-  
-  t = TEXTS[lang]
-  bot.send_message(
-      call.message.chat.id,
-      f"{t['lang_changed']}\n\n{t['welcome']}",
-      reply_markup=get_main_keyboard(lang)
-  )
+@dp.message(F.text.in_(["🌍 Tilni o'zgartirish", "🌍 Изменить язык", "🌍 Change Language"]))
+async def ask_language_cmd(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(get_text(user_id, "ask_lang"), reply_markup=get_lang_keyboard())
 
-@bot.message_handler(func=lambda message: any(message.text == TEXTS[l]["btn_lang"] for l in TEXTS))
-def change_language_btn(message):
-  bot.send_message(
-      message.chat.id,
-      "🌐 Select Language / Tilni tanlang / Выберите язык:",
-      reply_markup=get_language_inline()
-  )
 
-@bot.message_handler(func=lambda message: any(message.text == TEXTS[l]["btn_img2pdf"] for l in TEXTS))
-def start_img2pdf(message):
-  user_id = message.from_user.id
-  lang = user_languages.get(user_id, "uz")
-  user_images[user_id] = []
-  
-  t = TEXTS[lang]
-  kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-  kb.add(types.KeyboardButton(t["btn_make_pdf"]))
-  kb.add(types.KeyboardButton(t["btn_back"]))
-  
-  bot.send_message(message.chat.id, t["send_images"], reply_markup=kb)
+@dp.message(F.text.in_(["ℹ️ Bot haqida", "ℹ️ О боте", "ℹ️ About Bot"]))
+async def about(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer(get_text(user_id, "about"), reply_markup=get_menu(user_id))
 
-@bot.message_handler(func=lambda message: any(message.text == TEXTS[l]["btn_back"] for l in TEXTS))
-def go_back(message):
-  user_id = message.from_user.id
-  lang = user_languages.get(user_id, "uz")
-  bot.send_message(
-      message.chat.id,
-      TEXTS[lang]["welcome"],
-      reply_markup=get_main_keyboard(lang)
-  )
 
-@bot.message_handler(content_types=["photo"])
-def handle_photos(message):
-  user_id = message.from_user.id
-  lang = user_languages.get(user_id, "uz")
-  
-  if user_id not in user_images:
+@dp.message(F.text.in_(["📄 PDF yaratish", "📄 Создать PDF", "📄 Create PDF"]))
+async def start_pdf_process(message: types.Message):
+    user_id = message.from_user.id
     user_images[user_id] = []
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text=get_text(user_id, "btn_finish"), callback_data="generate_pdf")
+    kb.adjust(1)
+    
+    await message.answer(
+        get_text(user_id, "start_pdf"),
+        reply_markup=kb.as_markup()
+    )
 
-  # telebot uchun sinxron usul (await olib tashlandi)
-  file_info = bot.get_file(message.photo[-1].file_id)
-  downloaded_file = bot.download_file(file_info.file_path)
-  user_images[user_id].append(downloaded_file)
-  
-  msg = "📸 Rasm saqlandi!" if lang == "uz" else ("📸 Изображение сохранено!" if lang == "ru" else "📸 Image saved!")
-  bot.reply_to(message, f"{msg} (#{len(user_images[user_id])})")
 
-@bot.message_handler(func=lambda message: any(message.text == TEXTS[l]["btn_make_pdf"] for l in TEXTS))
-def generate_pdf(message):
-  user_id = message.from_user.id
-  lang = user_languages.get(user_id, "uz")
-  t = TEXTS[lang]
-  
-  if user_id not in user_images or not user_images[user_id]:
-    bot.send_message(message.chat.id, t["no_images"])
-    return
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_images:
+        user_images[user_id] = []
 
-  bot.send_message(message.chat.id, t["converting"])
+    photo = message.photo[-1]
+    file_info = await bot.get_file(photo.file_id)
+    
+    folder = Path(tempfile.gettempdir()) / f"pdf_bot_{user_id}"
+    folder.mkdir(parents=True, exist_ok=True)
+    
+    file_path = folder / f"{photo.file_unique_id}.jpg"
+    await bot.download_file(file_info.file_path, destination=file_path)
+    
+    user_images[user_id].append(str(file_path))
 
-  pil_images = []
-  for img_bytes in user_images[user_id]:
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    pil_images.append(img)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=get_text(user_id, "btn_finish"), callback_data="generate_pdf")
+    kb.adjust(1)
 
-  output = io.BytesIO()
-  pil_images[0].save(
-      output, format="PDF", save_all=True, append_images=pil_images[1:]
-  )
-  output.seek(0)
+    count = len(user_images[user_id])
+    await message.answer(
+        get_text(user_id, "photo_saved", count=count),
+        reply_markup=kb.as_markup()
+    )
 
-  bot.send_document(
-      message.chat.id,
-      types.InputFile(output, "converted_document.pdf"),
-      caption=t["success_pdf"],
-      reply_markup=get_main_keyboard(lang)
-  )
-  user_images[user_id] = []
+
+@dp.callback_query(F.data == "generate_pdf")
+async def generate_pdf(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    images = user_images.get(user_id, [])
+
+    if not images:
+        await callback.answer(get_text(user_id, "no_photos"), show_alert=True)
+        return
+
+    await callback.answer()
+    status_msg = await callback.message.answer(get_text(user_id, "processing"))
+
+    try:
+        pdf_path = Path(tempfile.gettempdir()) / f"document_{user_id}.pdf"
+        
+        pil_images = []
+        for img_path in images:
+            img = Image.open(img_path)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            pil_images.append(img)
+
+        if pil_images:
+            pil_images[0].save(
+                pdf_path,
+                "PDF",
+                save_all=True,
+                append_images=pil_images[1:]
+            )
+
+        document = types.FSInputFile(pdf_path, filename="Document.pdf")
+        await callback.message.answer_document(document, caption=get_text(user_id, "success"))
+        await status_msg.delete()
+
+    except Exception as e:
+        logger.exception("PDF yaratishda xatolik: %s", e)
+        await status_msg.edit_text(get_text(user_id, "error"))
+    finally:
+        user_images[user_id] = []
+        shutil.rmtree(Path(tempfile.gettempdir()) / f"pdf_bot_{user_id}", ignore_errors=True)
+
+
+async def main():
+    keep_alive()
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+    
+    await asyncio.sleep(2)
+    
+    try:
+        await dp.start_polling(bot, handle_signals=False)
+    finally:
+        await bot.session.close()
+
 
 if __name__ == "__main__":
-  server_thread = Thread(target=run_flask)
-  server_thread.daemon = True
-  server_thread.start()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot to'xtatildi.")
 
-  bot.infinity_polling()
 
 
 
